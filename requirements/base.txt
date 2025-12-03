@@ -1,0 +1,31 @@
+# Core Django
+Django>=5.1,<5.2
+djangorestframework>=3.15.0
+djangorestframework-simplejwt>=5.3.1
+django-environ>=0.11.2
+django-cors-headers>=4.3.0
+
+# Database
+psycopg2-binary>=2.9.9
+
+# Task Queue
+celery>=5.3.4
+redis>=5.0.0
+
+# Web3 & Blockchain
+web3>=6.13.0
+eth-account>=0.10.0
+siwe>=3.0.0
+story-protocol-python-sdk>=0.1.0
+
+# Image Processing
+Pillow>=10.1.0
+
+# IPFS / Pinata
+requests>=2.31.0
+
+# Utilities
+python-decouple>=3.8
+
+# AI / LLM
+litellm>=1.35.0

@@ -2,8 +2,15 @@
 Serializers for IP Asset API endpoints.
 """
 from rest_framework import serializers
+from django.core.exceptions import ValidationError
 from .models import IPAsset, RoyaltyPayment
 from apps.core.models import LoreUser
+from .validators import (
+    validate_file_size,
+    validate_file_type,
+    validate_file_name,
+    validate_media_url
+)
 
 
 class CreatorSerializer(serializers.ModelSerializer):
@@ -19,7 +26,7 @@ class IPAssetListSerializer(serializers.ModelSerializer):
     """Serializer for listing IP assets (used in browse/explore pages)."""
 
     creator = CreatorSerializer(read_only=True)
-    derivative_count = serializers.IntegerField(read_only=True)
+    derivative_count = serializers.SerializerMethodField()
 
     class Meta:
         model = IPAsset
@@ -37,6 +44,14 @@ class IPAssetListSerializer(serializers.ModelSerializer):
             'created_at',
         ]
         read_only_fields = fields
+
+    def get_derivative_count(self, obj):
+        """Get derivative count - use annotated value if available."""
+        # Use annotated count if available (from queryset optimization)
+        if hasattr(obj, 'derivative_count_annotated'):
+            return obj.derivative_count_annotated
+        # Fallback to property
+        return obj.derivative_count
 
 
 class ParentAssetSerializer(serializers.ModelSerializer):
@@ -82,7 +97,12 @@ class IPAssetDetailSerializer(serializers.ModelSerializer):
 
     def get_derivatives(self, obj):
         """Get list of derivative assets."""
-        derivatives = obj.derivatives.all()[:10]  # Limit to 10 most recent
+        # Use prefetched derivatives if available (optimized in view)
+        if hasattr(obj, '_prefetched_objects_cache') and 'derivatives' in obj._prefetched_objects_cache:
+            derivatives = obj._prefetched_objects_cache['derivatives']
+        else:
+            # Fallback to query if not prefetched
+            derivatives = obj.derivatives.filter(is_deleted=False).select_related('creator')[:10]
         return IPAssetListSerializer(derivatives, many=True).data
 
 
@@ -90,7 +110,11 @@ class IPAssetCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating a new IP asset."""
 
     # File upload field (will be handled separately for media upload)
-    media_file = serializers.FileField(write_only=True, required=False)
+    media_file = serializers.FileField(
+        write_only=True,
+        required=False,
+        validators=[validate_file_size, validate_file_type, validate_file_name]
+    )
 
     class Meta:
         model = IPAsset
@@ -113,6 +137,12 @@ class IPAssetCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 "Royalty percentage must be between 0 and 100"
             )
+        return value
+
+    def validate_media_url(self, value):
+        """Validate media URL format if provided."""
+        if value:
+            validate_media_url(value)
         return value
 
     def validate(self, attrs):
@@ -139,11 +169,35 @@ class IPAssetCreateSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
+class IPAssetUpdateSerializer(serializers.ModelSerializer):
+    """Serializer for updating an IP asset (limited fields only)."""
+
+    class Meta:
+        model = IPAsset
+        fields = ['title', 'description']
+        
+    def validate_title(self, value):
+        """Validate title is not empty."""
+        if not value or not value.strip():
+            raise serializers.ValidationError("Title cannot be empty")
+        return value.strip()
+    
+    def validate_description(self, value):
+        """Validate description is not empty."""
+        if not value or not value.strip():
+            raise serializers.ValidationError("Description cannot be empty")
+        return value.strip()
+
+
 class DerivativeCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating a derivative/remix of an existing IP asset."""
 
     parent_asset_id = serializers.IntegerField(write_only=True)
-    media_file = serializers.FileField(write_only=True, required=False)
+    media_file = serializers.FileField(
+        write_only=True,
+        required=False,
+        validators=[validate_file_size, validate_file_type, validate_file_name]
+    )
 
     class Meta:
         model = IPAsset
@@ -159,10 +213,16 @@ class DerivativeCreateSerializer(serializers.ModelSerializer):
             'media_url': {'required': False},
         }
 
+    def validate_media_url(self, value):
+        """Validate media URL format if provided."""
+        if value:
+            validate_media_url(value)
+        return value
+
     def validate_parent_asset_id(self, value):
         """Validate that parent asset exists and allows derivatives."""
         try:
-            parent = IPAsset.objects.get(id=value)
+            parent = IPAsset.objects.get(id=value, is_deleted=False)
         except IPAsset.DoesNotExist:
             raise serializers.ValidationError("Parent asset not found")
 
@@ -301,7 +361,7 @@ class DerivativeAnalysisSerializer(serializers.Serializer):
         """Validate that parent asset exists."""
         from .models import IPAsset
         try:
-            parent = IPAsset.objects.get(id=value)
+            parent = IPAsset.objects.get(id=value, is_deleted=False)
             self.context['parent_asset'] = parent
             return value
         except IPAsset.DoesNotExist:

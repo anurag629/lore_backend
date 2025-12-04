@@ -71,6 +71,17 @@ class IPAsset(models.Model):
         help_text="Allow commercial use"
     )
 
+    is_deleted = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Soft delete flag"
+    )
+    deleted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when asset was deleted"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -78,6 +89,15 @@ class IPAsset(models.Model):
         verbose_name = "IP Asset"
         verbose_name_plural = "IP Assets"
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['is_deleted', '-created_at']),
+            models.Index(fields=['creator', '-created_at']),
+            models.Index(fields=['is_derivative', '-created_at']),
+            models.Index(fields=['allow_derivatives', '-created_at']),
+            models.Index(fields=['commercial_rights', '-created_at']),
+            models.Index(fields=['created_at']),
+            models.Index(fields=['story_ip_id']),
+        ]
 
     def __str__(self):
         return f"{self.title} by {self.creator.display_name}"
@@ -85,7 +105,14 @@ class IPAsset(models.Model):
     @property
     def derivative_count(self):
         """Count of spin-offs/derivatives"""
-        return self.derivatives.count()
+        # Use cached count if available
+        if hasattr(self, '_derivative_count_cache'):
+            return self._derivative_count_cache
+        # Query with filter for deleted assets
+        count = self.derivatives.filter(is_deleted=False).count()
+        # Cache for this instance
+        self._derivative_count_cache = count
+        return count
 
 
 class RoyaltyPayment(models.Model):
@@ -416,3 +443,98 @@ class AIUsageStats(models.Model):
         if total == 0:
             return 0
         return (self.cache_hits / total) * 100
+
+
+class Collection(models.Model):
+    """
+    A curated collection of IP assets created by users.
+    Users can organize their favorite assets into collections.
+    """
+    creator = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='collections',
+        help_text="User who created this collection"
+    )
+
+    title = models.CharField(
+        max_length=255,
+        help_text="Collection title"
+    )
+
+    description = models.TextField(
+        blank=True,
+        help_text="Collection description"
+    )
+
+    cover_image_url = models.URLField(
+        blank=True,
+        null=True,
+        help_text="URL to collection cover image"
+    )
+
+    is_public = models.BooleanField(
+        default=True,
+        help_text="Whether collection is publicly visible"
+    )
+
+    assets = models.ManyToManyField(
+        'IPAsset',
+        related_name='collections',
+        blank=True,
+        help_text="IP assets in this collection"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Collection"
+        verbose_name_plural = "Collections"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['creator', '-created_at']),
+            models.Index(fields=['is_public', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.title} by {self.creator.display_name}"
+
+    @property
+    def asset_count(self):
+        """Get number of assets in collection."""
+        return self.assets.filter(is_deleted=False).count()
+
+
+class Favorite(models.Model):
+    """
+    User favorites/bookmarks for IP assets.
+    """
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='favorites',
+        help_text="User who favorited the asset"
+    )
+
+    asset = models.ForeignKey(
+        IPAsset,
+        on_delete=models.CASCADE,
+        related_name='favorites',
+        help_text="Asset that was favorited"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Favorite"
+        verbose_name_plural = "Favorites"
+        ordering = ['-created_at']
+        unique_together = [['user', 'asset']]  # Prevent duplicate favorites
+        indexes = [
+            models.Index(fields=['user', '-created_at']),
+            models.Index(fields=['asset', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.display_name} favorited {self.asset.title}"

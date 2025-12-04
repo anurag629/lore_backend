@@ -4,9 +4,24 @@ Serializers for user authentication and user data
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
+from django.db.models import Q
 
 from apps.core.models import LoreUser
 from apps.core.utils import verify_siwe_signature, normalize_wallet_address
+
+
+class CreatorSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for creator information (used in assets, collections, etc.)."""
+    display_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = LoreUser
+        fields = ['id', 'wallet_address', 'display_name', 'avatar_url']
+        read_only_fields = fields
+    
+    def get_display_name(self, obj):
+        """Get display name property."""
+        return obj.display_name
 
 
 class LoreUserSerializer(serializers.ModelSerializer):
@@ -25,6 +40,7 @@ class LoreUserSerializer(serializers.ModelSerializer):
             'email',
             'bio',
             'avatar_url',
+            'banner_url',
             'total_earnings',
             'assets_count',
             'total_spinoffs',
@@ -35,11 +51,29 @@ class LoreUserSerializer(serializers.ModelSerializer):
 
     def get_assets_count(self, obj):
         """Get number of assets created by user"""
-        return obj.assets.count()
+        # Use prefetched count if available
+        if hasattr(obj, '_prefetched_objects_cache') and 'assets' in obj._prefetched_objects_cache:
+            return len([a for a in obj._prefetched_objects_cache['assets'] if not a.is_deleted])
+        # Fallback to query
+        return obj.assets.filter(is_deleted=False).count()
 
     def get_total_spinoffs(self, obj):
         """Get total spinoffs across all user's assets"""
-        return sum(asset.derivative_count for asset in obj.assets.all())
+        # Optimize with aggregation if possible
+        if hasattr(obj, '_prefetched_objects_cache') and 'assets' in obj._prefetched_objects_cache:
+            return sum(
+                asset.derivative_count 
+                for asset in obj._prefetched_objects_cache['assets'] 
+                if not asset.is_deleted
+            )
+        # Fallback to query with aggregation
+        from django.db.models import Count
+        from apps.assets.models import IPAsset
+        return IPAsset.objects.filter(
+            parent_asset__creator=obj,
+            parent_asset__is_deleted=False,
+            is_deleted=False
+        ).count()
 
 
 class NonceRequestSerializer(serializers.Serializer):

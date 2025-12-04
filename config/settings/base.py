@@ -34,6 +34,8 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
+    'django_filters',
+    'drf_spectacular',
 
     # Local apps
     'apps.core.apps.CoreConfig',
@@ -119,6 +121,39 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20,
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '100/hour',      # Anonymous users
+        'user': '1000/hour',     # Authenticated users
+        'ai': '50/hour',         # AI endpoints (more restrictive)
+        'upload': '10/hour',     # File uploads
+    },
+    'EXCEPTION_HANDLER': 'apps.core.exceptions.custom_exception_handler',
+    'DEFAULT_FILTER_BACKENDS': [
+        'django_filters.rest_framework.DjangoFilterBackend',
+        'rest_framework.filters.SearchFilter',
+        'rest_framework.filters.OrderingFilter',
+    ],
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+# drf-spectacular settings
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Lore API',
+    'DESCRIPTION': 'API documentation for Lore - IP Asset Management Platform',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'COMPONENT_SPLIT_REQUEST': True,
+    'SCHEMA_PATH_PREFIX': '/api/',
+    'TAGS': [
+        {'name': 'Authentication', 'description': 'SIWE authentication endpoints'},
+        {'name': 'IP Assets', 'description': 'IP asset management endpoints'},
+        {'name': 'AI Features', 'description': 'AI-powered content generation endpoints'},
+        {'name': 'Health', 'description': 'System health check endpoints'},
+    ],
 }
 
 # JWT Configuration
@@ -158,7 +193,28 @@ CELERY_RESULT_BACKEND = env('REDIS_URL', default='redis://localhost:6379/0')
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
-CELERY_TIMEZONE = 'UTC'
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_ENABLE_UTC = True
+
+# Celery Beat Schedule (periodic tasks)
+CELERY_BEAT_SCHEDULE = {
+    'sync-blockchain-events': {
+        'task': 'sync_blockchain_events',
+        'schedule': 300.0,  # Every 5 minutes
+    },
+    'process-royalty-payments': {
+        'task': 'process_royalty_payments',
+        'schedule': 600.0,  # Every 10 minutes
+    },
+    'cleanup-old-logs': {
+        'task': 'cleanup_old_logs',
+        'schedule': 86400.0,  # Daily
+    },
+    'update-asset-statistics': {
+        'task': 'update_asset_statistics',
+        'schedule': 3600.0,  # Every hour
+    },
+}
 
 # Web3 Configuration
 WEB3_PROVIDER_URI = env('WEB3_PROVIDER_URI', default='https://aeneid.storyrpc.io')
@@ -194,3 +250,73 @@ AI_TEMPERATURE = env.float('AI_TEMPERATURE', default=0.7)
 AI_REQUEST_TIMEOUT = env.int('AI_REQUEST_TIMEOUT', default=30)
 AI_CACHE_ENABLED = env.bool('AI_CACHE_ENABLED', default=True)
 AI_CACHE_TTL = env.int('AI_CACHE_TTL', default=3600)  # 1 hour
+
+# File Upload Configuration
+MAX_FILE_SIZE = env.int('MAX_FILE_SIZE', default=50 * 1024 * 1024)  # 50MB default
+
+# Logging Configuration
+import os
+logs_dir = BASE_DIR / 'logs'
+os.makedirs(logs_dir, exist_ok=True)
+
+# Check if python-json-logger is available
+try:
+    import pythonjsonlogger.jsonlogger
+    JSON_FORMATTER_AVAILABLE = True
+except ImportError:
+    JSON_FORMATTER_AVAILABLE = False
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
+            'style': '{',
+        },
+        'simple': {
+            'format': '{levelname} {asctime} {name} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'file': {
+            'level': 'INFO',
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': str(logs_dir / 'django.log'),
+            'maxBytes': 1024 * 1024 * 10,  # 10MB
+            'backupCount': 5,
+            'formatter': 'verbose',  # Use verbose formatter (works without extra packages)
+        },
+        'console': {
+            'level': 'DEBUG' if env('DEBUG', default=False) else 'INFO',
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+    },
+    'loggers': {
+        'apps.assets': {
+            'handlers': ['file', 'console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'apps.core': {
+            'handlers': ['file', 'console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'django': {
+            'handlers': ['file', 'console'],
+            'level': 'INFO',
+        },
+    },
+}
+
+# Add JSON formatter if python-json-logger is available
+if JSON_FORMATTER_AVAILABLE:
+    LOGGING['formatters']['json'] = {
+        '()': 'pythonjsonlogger.jsonlogger.JsonFormatter',
+        'format': '%(asctime)s %(name)s %(levelname)s %(message)s',
+    }
+    # Optionally switch file handler to JSON formatter
+    # LOGGING['handlers']['file']['formatter'] = 'json'

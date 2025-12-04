@@ -36,6 +36,11 @@ class LoreUser(AbstractUser):
         help_text="Profile avatar URL"
     )
 
+    banner_url = models.URLField(
+        blank=True,
+        help_text="Profile banner/cover image URL"
+    )
+
     total_earnings = models.DecimalField(
         max_digits=20,
         decimal_places=6,
@@ -50,6 +55,10 @@ class LoreUser(AbstractUser):
         verbose_name = "Lore User"
         verbose_name_plural = "Lore Users"
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['wallet_address']),
+            models.Index(fields=['-created_at']),
+        ]
 
     def __str__(self):
         return self.username or self.wallet_address[:10]

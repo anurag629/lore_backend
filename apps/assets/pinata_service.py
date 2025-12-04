@@ -176,12 +176,16 @@ class PinataService:
         )
 
         # Calculate metadata hash (for Story Protocol)
+        # Story Protocol expects a hex string without '0x' prefix, or bytes
         metadata_json = json.dumps(metadata, sort_keys=True)
-        metadata_hash = '0x' + hashlib.sha256(metadata_json.encode()).hexdigest()
+        hash_digest = hashlib.sha256(metadata_json.encode()).hexdigest()
+        # Return both formats: with 0x prefix (for display) and without (for Story Protocol)
+        metadata_hash = hash_digest  # Story Protocol SDK handles hex conversion internally
 
         return {
             **result,
             'hash': metadata_hash,
+            'hash_with_prefix': '0x' + hash_digest,  # For display/logging
             'metadata': metadata
         }
 

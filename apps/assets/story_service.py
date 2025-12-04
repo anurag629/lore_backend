@@ -107,6 +107,15 @@ class StoryProtocolService:
         try:
             logger.info(f"Registering IP asset for creator: {creator_address}")
             logger.info(f"Metadata URI: {metadata_uri}")
+            logger.info(f"Metadata hash: {metadata_hash[:20]}... (length: {len(metadata_hash)})")
+
+            # Ensure metadata_hash is in correct format
+            # Story Protocol SDK expects hex string without '0x' prefix
+            if metadata_hash.startswith('0x'):
+                metadata_hash = metadata_hash[2:]
+            
+            # Ensure creator_address is checksummed
+            creator_address = self.web3.to_checksum_address(creator_address)
 
             # Register IP Asset using Story Protocol SDK
             # Note: Actual method names may vary based on SDK version

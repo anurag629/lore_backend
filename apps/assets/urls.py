@@ -16,11 +16,15 @@ from .views import (
     ai_usage_stats,
     ai_platform_stats,
 )
+from .collections_views import CollectionViewSet
+from .favorites_views import FavoriteViewSet
 
 # Create router and register viewsets
 router = DefaultRouter()
 router.register(r'assets', IPAssetViewSet, basename='asset')
 router.register(r'royalties', RoyaltyPaymentViewSet, basename='royalty')
+router.register(r'collections', CollectionViewSet, basename='collection')
+router.register(r'favorites', FavoriteViewSet, basename='favorite')
 
 # AI endpoints
 ai_urlpatterns = [

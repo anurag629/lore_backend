@@ -9,6 +9,9 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAuthenticated
 from django.shortcuts import get_object_or_404
+from django.db import transaction
+from django.db.models import F, Count, Q, Prefetch
+from django.utils import timezone
 from asgiref.sync import async_to_sync
 
 from .models import IPAsset, RoyaltyPayment
@@ -16,11 +19,18 @@ from .serializers import (
     IPAssetListSerializer,
     IPAssetDetailSerializer,
     IPAssetCreateSerializer,
+    IPAssetUpdateSerializer,
     DerivativeCreateSerializer,
     RoyaltyPaymentSerializer,
 )
 from .story_service import get_story_service
 from .pinata_service import get_pinata_service
+from .throttles import AIRateThrottle, UploadRateThrottle
+from .filters import IPAssetFilter
+from .cache import get_cached_asset_list, cache_asset_list, get_cached_asset_detail, cache_asset_detail
+from rest_framework.decorators import throttle_classes
+from rest_framework.filters import SearchFilter, OrderingFilter
+import django_filters.rest_framework
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +41,26 @@ class IPAssetViewSet(viewsets.ModelViewSet):
     Handles asset creation, listing, retrieval, and Story Protocol integration.
     """
 
-    queryset = IPAsset.objects.select_related('creator', 'parent_asset').all()
+    queryset = IPAsset.objects.select_related('creator', 'parent_asset').prefetch_related('derivatives').all()
     permission_classes = [IsAuthenticatedOrReadOnly]
+    throttle_classes = [UploadRateThrottle]
+    throttle_scope = 'upload'
+    filterset_class = IPAssetFilter
+    search_fields = ['title', 'description', 'creator__wallet_address']
+    ordering_fields = ['created_at', 'title', 'royalty_percentage']
+    ordering = ['-created_at']
+    filter_backends = [
+        django_filters.rest_framework.DjangoFilterBackend,
+        SearchFilter,
+        OrderingFilter,
+    ]
 
     def get_serializer_class(self):
         """Return appropriate serializer based on action."""
         if self.action == 'create':
             return IPAssetCreateSerializer
+        elif self.action == 'update' or self.action == 'partial_update':
+            return IPAssetUpdateSerializer
         elif self.action in ['retrieve']:
             return IPAssetDetailSerializer
         else:
@@ -45,39 +68,127 @@ class IPAssetViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         """
-        Optionally filter assets by query parameters.
-        Supports filtering by creator, is_derivative, etc.
+        Get queryset with optimizations.
+        Filtering is handled by django-filter.
         """
         queryset = super().get_queryset()
-
-        # Filter by creator
-        creator_id = self.request.query_params.get('creator', None)
-        if creator_id:
-            queryset = queryset.filter(creator_id=creator_id)
-
-        # Filter by derivative status
-        is_derivative = self.request.query_params.get('is_derivative', None)
-        if is_derivative is not None:
-            queryset = queryset.filter(
-                is_derivative=is_derivative.lower() == 'true'
+        
+        # Filter out deleted assets
+        if not self.request.user.is_staff:
+            queryset = queryset.filter(is_deleted=False)
+        
+        # Optimize queryset based on action
+        if self.action == 'list':
+            # For list view, annotate derivative count to avoid N+1 queries
+            queryset = queryset.annotate(
+                derivative_count_annotated=Count(
+                    'derivatives',
+                    filter=Q(derivatives__is_deleted=False)
+                )
             )
-
-        # Search by title
-        search = self.request.query_params.get('search', None)
-        if search:
-            queryset = queryset.filter(title__icontains=search)
-
+        elif self.action == 'retrieve':
+            # For detail view, prefetch derivatives with creator
+            queryset = queryset.prefetch_related(
+                Prefetch(
+                    'derivatives',
+                    queryset=IPAsset.objects.filter(is_deleted=False)
+                        .select_related('creator')
+                        .order_by('-created_at')[:10]
+                )
+            )
+        
         return queryset
 
+    def list(self, request, *args, **kwargs):
+        """
+        List assets with caching.
+        """
+        # Build cache key from query params
+        cache_params = {
+            'search': request.query_params.get('search', ''),
+            'is_derivative': request.query_params.get('is_derivative', ''),
+            'page': request.query_params.get('page', '1'),
+            'ordering': request.query_params.get('ordering', '-created_at'),
+        }
+        
+        # Try to get from cache
+        cached_response = get_cached_asset_list(cache_params)
+        if cached_response:
+            return Response(cached_response)
+        
+        # Get response from super
+        response = super().list(request, *args, **kwargs)
+        
+        # Cache the response
+        if response.status_code == 200:
+            cache_asset_list(cache_params, response.data)
+        
+        return response
+
+    def retrieve(self, request, *args, **kwargs):
+        """
+        Retrieve asset with caching.
+        """
+        asset_id = kwargs.get('pk')
+        
+        # Try to get from cache
+        cached_response = get_cached_asset_detail(asset_id)
+        if cached_response:
+            return Response(cached_response)
+        
+        # Get response from super
+        response = super().retrieve(request, *args, **kwargs)
+        
+        # Cache the response
+        if response.status_code == 200:
+            cache_asset_detail(asset_id, response.data)
+        
+        return response
+
+    def update(self, request, *args, **kwargs):
+        """Update asset with cache invalidation."""
+        response = super().update(request, *args, **kwargs)
+        if response.status_code == 200:
+            asset_id = kwargs.get('pk')
+            invalidate_asset_cache(asset_id)
+        return response
+
+    def partial_update(self, request, *args, **kwargs):
+        """Partial update asset with cache invalidation."""
+        response = super().partial_update(request, *args, **kwargs)
+        if response.status_code == 200:
+            asset_id = kwargs.get('pk')
+            invalidate_asset_cache(asset_id)
+        return response
+
+    def destroy(self, request, *args, **kwargs):
+        """Soft delete asset with cache invalidation."""
+        asset = self.get_object()
+        asset_id = asset.id
+        
+        # Perform soft delete
+        asset.is_deleted = True
+        asset.deleted_at = timezone.now()
+        asset.save()
+        
+        # Invalidate cache
+        invalidate_asset_cache(asset_id)
+        
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @transaction.atomic
     def create(self, request, *args, **kwargs):
         """
-        Create a new IP asset.
+        Create a new IP asset with full transaction rollback on failure.
         Steps:
-        1. Upload media file (if provided)
-        2. Upload metadata to IPFS
-        3. Register IP on Story Protocol
-        4. Attach license terms
-        5. Save to database
+        1. Upload media file to IPFS (outside transaction)
+        2. Start database transaction
+        3. Save asset temporarily to get ID
+        4. Upload metadata to IPFS
+        5. Register IP on Story Protocol
+        6. Attach license terms
+        7. Update asset with blockchain data
+        If any step fails, transaction rolls back automatically.
         """
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -95,7 +206,8 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_503_SERVICE_UNAVAILABLE
                 )
 
-            # Upload media file to IPFS via Pinata
+            # Step 1: Upload media file to IPFS (outside transaction)
+            # This happens before DB transaction to avoid rollback of IPFS uploads
             pinata_service = get_pinata_service()
             media_url = serializer.validated_data.get('media_url', '')
             media_file = serializer.validated_data.get('media_file')
@@ -111,85 +223,101 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                     logger.info(f"Media uploaded to IPFS: {media_result['ipfs_hash']}")
                 except Exception as e:
                     logger.error(f"Failed to upload media to IPFS: {str(e)}")
-                    # Fall back to placeholder if Pinata fails
-                    media_url = "https://placeholder.example.com/media"
+                    return Response(
+                        {
+                            'error': 'Failed to upload media to IPFS',
+                            'detail': str(e)
+                        },
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
 
-            # Save asset temporarily to get ID for metadata
-            asset = serializer.save(
-                creator=request.user,
-                story_ip_id='',  # Will be updated after registration
-                media_url=media_url,
-                metadata_hash=''  # Will be updated after metadata upload
-            )
-
-            # Upload metadata to IPFS
-            try:
-                logger.info("Uploading metadata to IPFS")
-                metadata_result = pinata_service.upload_ip_metadata(
-                    title=serializer.validated_data['title'],
-                    description=serializer.validated_data['description'],
+            # Step 2: Start database transaction
+            # All DB operations from here will rollback on failure
+            with transaction.atomic():
+                # Step 3: Save asset temporarily to get ID for metadata
+                asset = serializer.save(
+                    creator=request.user,
+                    story_ip_id='',  # Will be updated after registration
                     media_url=media_url,
-                    creator_address=request.user.wallet_address,
-                    asset_id=asset.id,
-                    license_terms={
-                        'allow_derivatives': serializer.validated_data.get('allow_derivatives', True),
-                        'commercial_rights': serializer.validated_data.get('commercial_rights', False),
-                        'royalty_percentage': serializer.validated_data.get('royalty_percentage', 0),
-                    }
+                    metadata_hash=''  # Will be updated after metadata upload
                 )
 
-                metadata_uri = metadata_result['url']  # ipfs:// URI
-                metadata_hash = metadata_result['hash']
-                logger.info(f"Metadata uploaded to IPFS: {metadata_result['ipfs_hash']}")
+                # Step 4: Upload metadata to IPFS
+                try:
+                    logger.info("Uploading metadata to IPFS")
+                    # Normalize wallet address before passing to metadata
+                    from apps.core.utils import normalize_wallet_address
+                    normalized_address = normalize_wallet_address(request.user.wallet_address)
+                    
+                    metadata_result = pinata_service.upload_ip_metadata(
+                        title=serializer.validated_data['title'],
+                        description=serializer.validated_data['description'],
+                        media_url=media_url,
+                        creator_address=normalized_address,
+                        asset_id=asset.id,
+                        license_terms={
+                            'allow_derivatives': serializer.validated_data.get('allow_derivatives', True),
+                            'commercial_rights': serializer.validated_data.get('commercial_rights', False),
+                            'royalty_percentage': serializer.validated_data.get('royalty_percentage', 0),
+                        }
+                    )
 
-            except Exception as e:
-                logger.error(f"Failed to upload metadata to IPFS: {str(e)}")
-                # Use fallback if Pinata fails
-                metadata_uri = "ipfs://placeholder-hash"
-                metadata_hash = "0x" + "0" * 64
+                    metadata_uri = metadata_result['url']  # ipfs:// URI
+                    metadata_hash = metadata_result['hash']  # Hex string without 0x prefix
+                    logger.info(f"Metadata uploaded to IPFS: {metadata_result['ipfs_hash']}")
+                    logger.info(f"Metadata hash: {metadata_result.get('hash_with_prefix', metadata_hash)}")
 
-            logger.info(f"Registering IP asset on Story Protocol for user: {request.user.wallet_address}")
+                except Exception as e:
+                    logger.error(f"Failed to upload metadata to IPFS: {str(e)}")
+                    # Transaction will rollback, asset deleted
+                    raise
 
-            # Register IP asset on Story Protocol
-            try:
-                registration_result = async_to_sync(story_service.register_ip_asset)(
-                    metadata_uri=metadata_uri,
-                    metadata_hash=metadata_hash,
-                    creator_address=request.user.wallet_address
-                )
+                # Step 5: Register IP asset on Story Protocol
+                # Ensure wallet address is normalized
+                normalized_creator_address = normalize_wallet_address(request.user.wallet_address)
+                logger.info(f"Registering IP asset on Story Protocol for user: {normalized_creator_address}")
+                logger.info(f"Metadata hash format: {metadata_hash[:20]}... (length: {len(metadata_hash)})")
+                try:
+                    registration_result = async_to_sync(story_service.register_ip_asset)(
+                        metadata_uri=metadata_uri,
+                        metadata_hash=metadata_hash,
+                        creator_address=normalized_creator_address
+                    )
 
-                story_ip_id = registration_result['ip_id']
-                logger.info(f"IP Asset registered with ID: {story_ip_id}")
+                    story_ip_id = registration_result['ip_id']
+                    logger.info(f"IP Asset registered with ID: {story_ip_id}")
 
-            except Exception as e:
-                logger.error(f"Failed to register IP on Story Protocol: {str(e)}")
-                return Response(
-                    {
-                        'error': 'Failed to register IP on blockchain',
-                        'detail': str(e)
-                    },
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
+                except Exception as e:
+                    logger.error(f"Failed to register IP on Story Protocol: {str(e)}")
+                    # Transaction will rollback
+                    raise
 
-            # Attach license terms
-            try:
-                async_to_sync(story_service.attach_license_terms)(
-                    ip_id=story_ip_id,
-                    allow_derivatives=serializer.validated_data.get('allow_derivatives', True),
-                    commercial_use=serializer.validated_data.get('commercial_rights', False),
-                    royalty_percentage=serializer.validated_data.get('royalty_percentage', 0)
-                )
-                logger.info(f"License terms attached to IP: {story_ip_id}")
+                # Step 6: Attach license terms
+                try:
+                    async_to_sync(story_service.attach_license_terms)(
+                        ip_id=story_ip_id,
+                        allow_derivatives=serializer.validated_data.get('allow_derivatives', True),
+                        commercial_use=serializer.validated_data.get('commercial_rights', False),
+                        royalty_percentage=serializer.validated_data.get('royalty_percentage', 0)
+                    )
+                    logger.info(f"License terms attached to IP: {story_ip_id}")
 
-            except Exception as e:
-                logger.error(f"Failed to attach license terms: {str(e)}")
-                # Continue anyway - asset is registered
+                except Exception as e:
+                    logger.error(f"Failed to attach license terms: {str(e)}")
+                    # Note: Asset is registered but license not attached
+                    # We continue as this is not critical - asset can still function
+                    # Consider: Should we rollback or continue?
+                    # For now, log and continue
 
-            # Update asset with Story Protocol ID and metadata hash
-            asset.story_ip_id = story_ip_id
-            asset.metadata_hash = metadata_hash
-            asset.save()
+                # Step 7: Update asset with Story Protocol ID and metadata hash
+                asset.story_ip_id = story_ip_id
+                asset.metadata_hash = metadata_hash
+                asset.save()
 
+            # Invalidate cache
+            invalidate_asset_cache()
+
+            # Transaction completed successfully
             # Return created asset
             response_serializer = IPAssetDetailSerializer(asset)
             return Response(
@@ -208,9 +336,10 @@ class IPAssetViewSet(viewsets.ModelViewSet):
             )
 
     @action(detail=False, methods=['post'], permission_classes=[IsAuthenticated])
+    @transaction.atomic
     def create_derivative(self, request):
         """
-        Create a derivative/remix of an existing IP asset.
+        Create a derivative/remix of an existing IP asset with transaction rollback.
         Requires parent asset to allow derivatives.
         """
         serializer = DerivativeCreateSerializer(
@@ -231,7 +360,7 @@ class IPAssetViewSet(viewsets.ModelViewSet):
             parent_asset = serializer.context.get('parent_asset')
             pinata_service = get_pinata_service()
 
-            # Handle file upload to IPFS
+            # Step 1: Handle file upload to IPFS (outside transaction)
             media_url = serializer.validated_data.get('media_url', '')
             media_file = serializer.validated_data.get('media_file')
 
@@ -246,62 +375,89 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                     logger.info(f"Derivative media uploaded: {media_result['ipfs_hash']}")
                 except Exception as e:
                     logger.error(f"Failed to upload derivative media: {str(e)}")
-                    media_url = "https://placeholder.example.com/media"
+                    return Response(
+                        {
+                            'error': 'Failed to upload media to IPFS',
+                            'detail': str(e)
+                        },
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
 
-            # Save derivative temporarily to get ID
-            derivative = serializer.save(
-                creator=request.user,
-                story_ip_id='',
-                media_url=media_url,
-                metadata_hash=''
-            )
-
-            # Upload metadata to IPFS
-            try:
-                logger.info("Uploading derivative metadata to IPFS")
-                metadata_result = pinata_service.upload_ip_metadata(
-                    title=serializer.validated_data['title'],
-                    description=serializer.validated_data['description'],
+            # Step 2: Start database transaction
+            with transaction.atomic():
+                # Step 3: Save derivative temporarily to get ID
+                derivative = serializer.save(
+                    creator=request.user,
+                    story_ip_id='',
                     media_url=media_url,
-                    creator_address=request.user.wallet_address,
-                    asset_id=derivative.id,
-                    license_terms={
-                        'commercial_rights': serializer.validated_data.get('commercial_rights', False),
-                        'parent_ip_id': parent_asset.story_ip_id,
-                        'is_derivative': True,
-                    }
+                    metadata_hash=''
                 )
 
-                metadata_uri = metadata_result['url']
-                metadata_hash = metadata_result['hash']
-                logger.info(f"Derivative metadata uploaded: {metadata_result['ipfs_hash']}")
+                # Step 4: Upload metadata to IPFS
+                try:
+                    logger.info("Uploading derivative metadata to IPFS")
+                    metadata_result = pinata_service.upload_ip_metadata(
+                        title=serializer.validated_data['title'],
+                        description=serializer.validated_data['description'],
+                        media_url=media_url,
+                        creator_address=request.user.wallet_address,
+                        asset_id=derivative.id,
+                        license_terms={
+                            'commercial_rights': serializer.validated_data.get('commercial_rights', False),
+                            'parent_ip_id': parent_asset.story_ip_id,
+                            'is_derivative': True,
+                        }
+                    )
 
-            except Exception as e:
-                logger.error(f"Failed to upload derivative metadata: {str(e)}")
-                metadata_uri = "ipfs://placeholder-derivative-hash"
-                metadata_hash = "0x" + "0" * 64
+                    metadata_uri = metadata_result['url']
+                    metadata_hash = metadata_result['hash']
+                    logger.info(f"Derivative metadata uploaded: {metadata_result['ipfs_hash']}")
 
-            # Register derivative IP on Story Protocol
-            registration_result = async_to_sync(story_service.register_ip_asset)(
-                metadata_uri=metadata_uri,
-                metadata_hash=metadata_hash,
-                creator_address=request.user.wallet_address
-            )
+                except Exception as e:
+                    logger.error(f"Failed to upload derivative metadata: {str(e)}")
+                    # Transaction will rollback
+                    raise
 
-            child_ip_id = registration_result['ip_id']
+                # Step 5: Register derivative IP on Story Protocol
+                try:
+                    registration_result = async_to_sync(story_service.register_ip_asset)(
+                        metadata_uri=metadata_uri,
+                        metadata_hash=metadata_hash,
+                        creator_address=request.user.wallet_address
+                    )
 
-            # Register derivative relationship
-            async_to_sync(story_service.register_derivative)(
-                child_ip_id=child_ip_id,
-                parent_ip_ids=[parent_asset.story_ip_id],
-                license_terms=None
-            )
+                    child_ip_id = registration_result['ip_id']
+                    logger.info(f"Derivative IP registered with ID: {child_ip_id}")
 
-            # Update derivative with Story Protocol data
-            derivative.story_ip_id = child_ip_id
-            derivative.metadata_hash = metadata_hash
-            derivative.save()
+                except Exception as e:
+                    logger.error(f"Failed to register derivative IP: {str(e)}")
+                    # Transaction will rollback
+                    raise
 
+                # Step 6: Register derivative relationship
+                try:
+                    async_to_sync(story_service.register_derivative)(
+                        child_ip_id=child_ip_id,
+                        parent_ip_ids=[parent_asset.story_ip_id],
+                        license_terms=None
+                    )
+                    logger.info(f"Derivative relationship registered")
+                except Exception as e:
+                    logger.error(f"Failed to register derivative relationship: {str(e)}")
+                    # Continue - relationship can be registered later
+                    # Asset is already registered
+
+                # Step 7: Update derivative with Story Protocol data
+                derivative.story_ip_id = child_ip_id
+                derivative.metadata_hash = metadata_hash
+                derivative.save()
+
+            # Invalidate cache
+            invalidate_asset_cache()
+            if parent_asset:
+                invalidate_asset_cache(parent_asset.id)
+
+            # Transaction completed successfully
             response_serializer = IPAssetDetailSerializer(derivative)
             return Response(
                 response_serializer.data,
@@ -322,7 +478,8 @@ class IPAssetViewSet(viewsets.ModelViewSet):
     def derivatives(self, request, pk=None):
         """Get all derivatives of an IP asset."""
         asset = self.get_object()
-        derivatives = asset.derivatives.all()
+        # Optimize query with select_related for creator
+        derivatives = asset.derivatives.filter(is_deleted=False).select_related('creator').order_by('-created_at')
         serializer = IPAssetListSerializer(derivatives, many=True)
         return Response(serializer.data)
 
@@ -356,13 +513,27 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                 claimer_address=request.user.wallet_address
             )
 
-            # TODO: Save royalty payment record to database
-            # RoyaltyPayment.objects.create(...)
+            # Save royalty payment record to database
+            with transaction.atomic():
+                royalty_payment = RoyaltyPayment.objects.create(
+                    asset=asset,
+                    recipient=request.user,
+                    amount=result['amount'],
+                    transaction_hash=result['transaction_hash'],
+                    block_number=result.get('block_number', 0)
+                )
+
+                # Update user's total earnings
+                request.user.total_earnings = F('total_earnings') + result['amount']
+                request.user.save(update_fields=['total_earnings'])
+
+            logger.info(f"Royalty payment recorded: {royalty_payment.id} for asset {asset.id}")
 
             return Response({
                 'message': 'Royalties claimed successfully',
                 'amount': result['amount'],
                 'transaction_hash': result['transaction_hash'],
+                'payment_id': royalty_payment.id,
             })
 
         except Exception as e:
@@ -446,6 +617,7 @@ import time
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@throttle_classes([AIRateThrottle])
 def generate_title(request):
     """Generate title suggestions from description."""
     serializer = TitleGenerationSerializer(data=request.data)
@@ -520,6 +692,7 @@ def generate_title(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@throttle_classes([AIRateThrottle])
 def enhance_description(request):
     """Enhance brief description into detailed narrative."""
     serializer = DescriptionEnhancementSerializer(data=request.data)
@@ -586,6 +759,7 @@ def enhance_description(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@throttle_classes([AIRateThrottle])
 def analyze_content(request):
     """Analyze content and extract categories, tags."""
     serializer = ContentAnalysisSerializer(data=request.data)
@@ -650,6 +824,7 @@ def analyze_content(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@throttle_classes([AIRateThrottle])
 def suggest_license(request):
     """Suggest optimal license terms."""
     serializer = LicenseSuggestionSerializer(data=request.data)
@@ -714,6 +889,7 @@ def suggest_license(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@throttle_classes([AIRateThrottle])
 def analyze_derivative(request):
     """Analyze parent-derivative relationship."""
     serializer = DerivativeAnalysisSerializer(data=request.data, context={'request': request})

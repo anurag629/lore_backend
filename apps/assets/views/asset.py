@@ -223,27 +223,230 @@ class IPAssetViewSet(viewsets.ModelViewSet):
         
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    # ==================== CREATION STEP HELPERS ====================
+    # These methods are idempotent - they check if a step is already completed
+    
+    def _step_upload_media(self, asset, media_file=None, media_url=None, pinata_service=None):
+        """
+        Step 1: Upload media to IPFS (idempotent).
+        Returns: (media_url, media_ipfs_hash) or raises exception
+        """
+        # Check if already uploaded
+        if asset.media_ipfs_hash and asset.media_url:
+            logger.info(f"Media already uploaded for asset {asset.id}, using existing: {asset.media_ipfs_hash}")
+            return asset.media_url, asset.media_ipfs_hash
+        
+        if not media_file and not media_url:
+            raise ValueError("Either media_file or media_url must be provided")
+        
+        if media_url and not media_file:
+            # Media URL provided, no file upload needed
+            # Extract IPFS hash from URL if it's an IPFS URL
+            if 'ipfs' in media_url.lower():
+                # Try to extract hash from URL
+                parts = media_url.split('/')
+                ipfs_hash = parts[-1] if parts else None
+                if ipfs_hash:
+                    asset.media_ipfs_hash = ipfs_hash
+                    asset.media_url = media_url
+                    asset.step_data.setdefault('media_upload', {})['ipfs_hash'] = ipfs_hash
+                    asset.step_data.setdefault('media_upload', {})['url'] = media_url
+                    asset.save(update_fields=['media_ipfs_hash', 'media_url', 'step_data'])
+                    return media_url, ipfs_hash
+            return media_url, None
+        
+        # Upload file to IPFS
+        if not pinata_service:
+            pinata_service = get_pinata_service()
+        
+        logger.info(f"Uploading media file to IPFS: {media_file.name}")
+        media_result = pinata_service.upload_file(
+            file=media_file,
+            filename=media_file.name
+        )
+        
+        media_url = media_result['url']
+        media_ipfs_hash = media_result['ipfs_hash']
+        
+        # Store results
+        asset.media_ipfs_hash = media_ipfs_hash
+        asset.media_url = media_url
+        asset.step_data.setdefault('media_upload', {})['ipfs_hash'] = media_ipfs_hash
+        asset.step_data.setdefault('media_upload', {})['url'] = media_url
+        asset.creation_step = 'db_save'
+        asset.save(update_fields=['media_ipfs_hash', 'media_url', 'step_data', 'creation_step'])
+        
+        logger.info(f"Media uploaded to IPFS: {media_ipfs_hash}")
+        return media_url, media_ipfs_hash
+    
+    def _step_upload_metadata(self, asset, title, description, media_url, creator_address, 
+                              license_terms, pinata_service=None):
+        """
+        Step 3: Upload metadata to IPFS (idempotent).
+        Returns: (metadata_uri, metadata_hash) or raises exception
+        """
+        # Check if already uploaded
+        if asset.metadata_hash:
+            logger.info(f"Metadata already uploaded for asset {asset.id}, using existing: {asset.metadata_hash}")
+            metadata_uri = asset.step_data.get('metadata_upload', {}).get('uri', f"ipfs://{asset.metadata_hash}")
+            return metadata_uri, asset.metadata_hash
+        
+        if not pinata_service:
+            pinata_service = get_pinata_service()
+        
+        logger.info("Uploading metadata to IPFS")
+        normalized_address = normalize_wallet_address(creator_address)
+        
+        metadata_result = pinata_service.upload_ip_metadata(
+            title=title,
+            description=description,
+            media_url=media_url,
+            creator_address=normalized_address,
+            asset_id=asset.id,
+            license_terms=license_terms
+        )
+        
+        metadata_uri = metadata_result['url']  # ipfs:// URI
+        metadata_hash = metadata_result['hash']  # Hex string without 0x prefix
+        
+        # Store results
+        asset.metadata_hash = metadata_hash
+        asset.step_data.setdefault('metadata_upload', {})['uri'] = metadata_uri
+        asset.step_data.setdefault('metadata_upload', {})['hash'] = metadata_hash
+        asset.step_data.setdefault('metadata_upload', {})['ipfs_hash'] = metadata_result.get('ipfs_hash', '')
+        asset.creation_step = 'story_registration'
+        asset.save(update_fields=['metadata_hash', 'step_data', 'creation_step'])
+        
+        logger.info(f"Metadata uploaded to IPFS: {metadata_result.get('ipfs_hash', metadata_hash)}")
+        return metadata_uri, metadata_hash
+    
+    def _step_register_story_protocol(self, asset, metadata_uri, metadata_hash, creator_address,
+                                     allow_derivatives, commercial_use, royalty_percentage,
+                                     story_service=None):
+        """
+        Step 4: Register IP on Story Protocol (idempotent).
+        Returns: story_ip_id or raises exception
+        """
+        # Check if already registered
+        if asset.story_ip_id:
+            logger.info(f"Asset {asset.id} already registered on Story Protocol: {asset.story_ip_id}")
+            return asset.story_ip_id
+        
+        if not story_service:
+            story_service = get_story_service()
+        
+        if not story_service.is_ready():
+            raise RuntimeError('Story Protocol service not available')
+        
+        # Normalize and checksum wallet address
+        from web3 import Web3
+        normalized_creator_address = normalize_wallet_address(creator_address)
+        try:
+            normalized_creator_address = Web3.to_checksum_address(normalized_creator_address)
+        except Exception as e:
+            raise ValueError(f"Invalid wallet address format: {normalized_creator_address}. Error: {e}")
+        
+        logger.info(f"Registering IP asset on Story Protocol for user: {normalized_creator_address}")
+        
+        # Update status
+        asset.registration_status = 'retrying'
+        asset.registration_attempts += 1
+        asset.last_registration_attempt = timezone.now()
+        asset.save(update_fields=['registration_status', 'registration_attempts', 'last_registration_attempt'])
+        
+        try:
+            registration_result = async_to_sync(story_service.register_ip_asset)(
+                metadata_uri=metadata_uri,
+                metadata_hash=metadata_hash,
+                creator_address=normalized_creator_address,
+                allow_derivatives=allow_derivatives,
+                commercial_use=commercial_use,
+                royalty_percentage=royalty_percentage
+            )
+            
+            story_ip_id = registration_result['ip_id']
+            
+            # Store results
+            asset.story_ip_id = story_ip_id
+            asset.step_data.setdefault('story_registration', {})['ip_id'] = story_ip_id
+            asset.step_data.setdefault('story_registration', {})['transaction_hash'] = registration_result.get('transaction_hash', '')
+            asset.step_data.setdefault('story_registration', {})['block_number'] = registration_result.get('block_number', 0)
+            asset.creation_step = 'license_attachment'
+            asset.save(update_fields=['story_ip_id', 'step_data', 'creation_step'])
+            
+            logger.info(f"IP Asset registered with ID: {story_ip_id}")
+            return story_ip_id
+            
+        except Exception as e:
+            error_message = str(e)
+            asset.registration_status = 'failed'
+            asset.registration_error = error_message
+            asset.failed_at_step = 'story_registration'
+            asset.save(update_fields=['registration_status', 'registration_error', 'failed_at_step'])
+            raise
+    
+    def _step_attach_license(self, asset, story_ip_id, allow_derivatives, commercial_use,
+                            royalty_percentage, story_service=None):
+        """
+        Step 5: Attach license terms (idempotent, non-critical).
+        Returns: True if successful, False if failed (doesn't raise)
+        """
+        # Check if already attached (non-critical step, so we don't fail if missing)
+        if asset.step_data.get('license_attachment', {}).get('attached', False):
+            logger.info(f"License already attached for asset {asset.id}")
+            return True
+        
+        if not story_service:
+            story_service = get_story_service()
+        
+        if not story_service.is_ready():
+            logger.warning("Story Protocol service not available for license attachment")
+            return False
+        
+        try:
+            async_to_sync(story_service.attach_license_terms)(
+                ip_id=story_ip_id,
+                allow_derivatives=allow_derivatives,
+                commercial_use=commercial_use,
+                royalty_percentage=royalty_percentage
+            )
+            
+            # Store result
+            asset.step_data.setdefault('license_attachment', {})['attached'] = True
+            asset.creation_step = 'completed'
+            asset.registration_status = 'registered'
+            asset.registration_error = ''
+            asset.failed_at_step = None
+            asset.save(update_fields=['step_data', 'creation_step', 'registration_status', 'registration_error', 'failed_at_step'])
+            
+            logger.info(f"License terms attached to IP: {story_ip_id}")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"Failed to attach license terms: {str(e)}")
+            # Non-critical, so we mark as completed anyway
+            asset.creation_step = 'completed'
+            asset.registration_status = 'registered'
+            asset.registration_error = ''
+            asset.failed_at_step = None
+            asset.step_data.setdefault('license_attachment', {})['attached'] = False
+            asset.step_data.setdefault('license_attachment', {})['error'] = str(e)
+            asset.save(update_fields=['step_data', 'creation_step', 'registration_status', 'registration_error', 'failed_at_step'])
+            return False
+
     @transaction.atomic
     def create(self, request, *args, **kwargs):
         """
-        Create a new IP asset with full transaction rollback on failure.
-        Steps:
-        1. Upload media file to IPFS (outside transaction)
-        2. Start database transaction
-        3. Save asset temporarily to get ID
-        4. Upload metadata to IPFS
-        5. Register IP on Story Protocol
-        6. Attach license terms
-        7. Update asset with blockchain data
-        If any step fails, transaction rolls back automatically.
+        Create a new IP asset with step-by-step tracking and retry support.
+        Steps are tracked and can be resumed from failure point.
         """
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         try:
-            # Get Story Protocol service
+            pinata_service = get_pinata_service()
             story_service = get_story_service()
-
+            
             if not story_service.is_ready():
                 return Response(
                     {
@@ -253,156 +456,100 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_503_SERVICE_UNAVAILABLE
                 )
 
-            # Step 1: Upload media file to IPFS (outside transaction)
-            # This happens before DB transaction to avoid rollback of IPFS uploads
-            pinata_service = get_pinata_service()
+            # Step 1: Save asset to database FIRST (so we have a record even if later steps fail)
             media_url = serializer.validated_data.get('media_url', '')
             media_file = serializer.validated_data.get('media_file')
-
-            if media_file:
-                try:
-                    logger.info(f"Uploading media file to IPFS: {media_file.name}")
-                    media_result = pinata_service.upload_file(
-                        file=media_file,
-                        filename=media_file.name
-                    )
-                    media_url = media_result['url']  # Gateway URL
-                    logger.info(f"Media uploaded to IPFS: {media_result['ipfs_hash']}")
-                except Exception as e:
-                    logger.error(f"Failed to upload media to IPFS: {str(e)}")
-                    return Response(
-                        {
-                            'error': 'Failed to upload media to IPFS',
-                            'detail': str(e)
-                        },
-                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                    )
-
-            # Step 2: Save asset to Django database FIRST (so it persists even if Story Protocol fails)
-            # This ensures we have a record of all assets, even if blockchain registration fails
-            from django.utils import timezone
+            
             asset = serializer.save(
                 creator=request.user,
-                story_ip_id='',  # Will be updated after registration
-                media_url=media_url,
-                metadata_hash='',  # Will be updated after metadata upload
-                registration_status='pending',  # Initial status
-                registration_attempts=0
+                story_ip_id='',
+                media_url=media_url or '',  # Will be updated after media upload
+                metadata_hash='',
+                registration_status='pending',
+                registration_attempts=0,
+                creation_step='media_upload',
+                step_data={}
             )
-            logger.info(f"Asset saved to database with ID: {asset.id}, status: pending")
+            logger.info(f"Asset saved to database with ID: {asset.id}, starting from step: media_upload")
 
-            # Step 3: Upload metadata to IPFS
+            # Step 2: Upload media to IPFS (idempotent)
             try:
-                logger.info("Uploading metadata to IPFS")
-                # Normalize wallet address before passing to metadata
-                normalized_address = normalize_wallet_address(request.user.wallet_address)
+                media_url, media_ipfs_hash = self._step_upload_media(
+                    asset=asset,
+                    media_file=media_file,
+                    media_url=media_url,
+                    pinata_service=pinata_service
+                )
+            except Exception as e:
+                logger.error(f"Failed to upload media to IPFS: {str(e)}")
+                asset.registration_status = 'failed'
+                asset.registration_error = f"Failed to upload media to IPFS: {str(e)}"
+                asset.failed_at_step = 'media_upload'
+                asset.save(update_fields=['registration_status', 'registration_error', 'failed_at_step'])
+                raise
+
+            # Step 3: Upload metadata to IPFS (idempotent)
+            try:
+                license_terms = {
+                    'allow_derivatives': serializer.validated_data.get('allow_derivatives', True),
+                    'commercial_rights': serializer.validated_data.get('commercial_rights', False),
+                    'royalty_percentage': serializer.validated_data.get('royalty_percentage', 0),
+                }
                 
-                metadata_result = pinata_service.upload_ip_metadata(
+                metadata_uri, metadata_hash = self._step_upload_metadata(
+                    asset=asset,
                     title=serializer.validated_data['title'],
                     description=serializer.validated_data['description'],
                     media_url=media_url,
-                    creator_address=normalized_address,
-                    asset_id=asset.id,
-                    license_terms={
-                        'allow_derivatives': serializer.validated_data.get('allow_derivatives', True),
-                        'commercial_rights': serializer.validated_data.get('commercial_rights', False),
-                        'royalty_percentage': serializer.validated_data.get('royalty_percentage', 0),
-                    }
+                    creator_address=request.user.wallet_address,
+                    license_terms=license_terms,
+                    pinata_service=pinata_service
                 )
-
-                metadata_uri = metadata_result['url']  # ipfs:// URI
-                metadata_hash = metadata_result['hash']  # Hex string without 0x prefix
-                logger.info(f"Metadata uploaded to IPFS: {metadata_result['ipfs_hash']}")
-                logger.info(f"Metadata hash: {metadata_result.get('hash_with_prefix', metadata_hash)}")
-
-                # Update asset with metadata hash
-                asset.metadata_hash = metadata_hash
-                asset.save()
-
             except Exception as e:
                 logger.error(f"Failed to upload metadata to IPFS: {str(e)}")
-                # Update asset status to failed
                 asset.registration_status = 'failed'
                 asset.registration_error = f"Failed to upload metadata to IPFS: {str(e)}"
-                asset.registration_attempts = 1
-                asset.last_registration_attempt = timezone.now()
-                asset.save()
+                asset.failed_at_step = 'metadata_upload'
+                asset.save(update_fields=['registration_status', 'registration_error', 'failed_at_step'])
                 raise
 
-            # Step 4: Register IP asset on Story Protocol (OUTSIDE transaction so asset persists on failure)
-            # Ensure wallet address is normalized and checksummed (required by Web3.py)
-            from web3 import Web3
-            normalized_creator_address = normalize_wallet_address(request.user.wallet_address)
-            # Double-check checksumming (normalize_wallet_address may fail silently)
+            # Step 4: Register on Story Protocol (idempotent)
             try:
-                normalized_creator_address = Web3.to_checksum_address(normalized_creator_address)
-            except Exception as e:
-                logger.error(f"Failed to checksum address {normalized_creator_address}: {e}")
-                asset.registration_status = 'failed'
-                asset.registration_error = f"Invalid wallet address format: {normalized_creator_address}"
-                asset.registration_attempts = 1
-                asset.last_registration_attempt = timezone.now()
-                asset.save()
-                raise ValueError(f"Invalid wallet address format: {normalized_creator_address}")
-            
-            logger.info(f"Registering IP asset on Story Protocol for user: {normalized_creator_address}")
-            logger.info(f"Metadata hash format: {metadata_hash[:20]}... (length: {len(metadata_hash)})")
-            
-            # Update asset status to retrying
-            asset.registration_status = 'retrying'
-            asset.registration_attempts += 1
-            asset.last_registration_attempt = timezone.now()
-            asset.save()
-            
-            try:
-                registration_result = async_to_sync(story_service.register_ip_asset)(
+                story_ip_id = self._step_register_story_protocol(
+                    asset=asset,
                     metadata_uri=metadata_uri,
                     metadata_hash=metadata_hash,
-                    creator_address=normalized_creator_address,
+                    creator_address=request.user.wallet_address,
                     allow_derivatives=serializer.validated_data.get('allow_derivatives', True),
                     commercial_use=serializer.validated_data.get('commercial_rights', False),
-                    royalty_percentage=serializer.validated_data.get('royalty_percentage', 0)
+                    royalty_percentage=serializer.validated_data.get('royalty_percentage', 0),
+                    story_service=story_service
                 )
-
-                story_ip_id = registration_result['ip_id']
-                logger.info(f"IP Asset registered with ID: {story_ip_id}")
-
-                # Step 5: Attach license terms
-                try:
-                    async_to_sync(story_service.attach_license_terms)(
-                        ip_id=story_ip_id,
-                        allow_derivatives=serializer.validated_data.get('allow_derivatives', True),
-                        commercial_use=serializer.validated_data.get('commercial_rights', False),
-                        royalty_percentage=serializer.validated_data.get('royalty_percentage', 0)
-                    )
-                    logger.info(f"License terms attached to IP: {story_ip_id}")
-
-                except Exception as e:
-                    logger.warning(f"Failed to attach license terms: {str(e)}")
-                    # Note: Asset is registered but license not attached
-                    # We continue as this is not critical - asset can still function
-
-                # Step 6: Update asset with Story Protocol ID and success status
-                asset.story_ip_id = story_ip_id
-                asset.registration_status = 'registered'
-                asset.registration_error = ''  # Clear any previous errors
-                asset.save()
-                logger.info(f"Asset {asset.id} successfully registered on Story Protocol with IP ID: {story_ip_id}")
-
             except Exception as e:
                 error_message = str(e)
                 logger.error(f"Failed to register IP on Story Protocol: {error_message}")
-                # Update asset status to failed (but keep asset in database)
+                # Asset is saved with failed status, user can retry
                 asset.registration_status = 'failed'
                 asset.registration_error = error_message
-                asset.save()
-                logger.warning(f"Asset {asset.id} saved to database but Story Protocol registration failed. Error: {error_message}")
-                # Don't raise - return the asset with failed status so user can retry
+                asset.failed_at_step = 'story_registration'
+                asset.save(update_fields=['registration_status', 'registration_error', 'failed_at_step'])
+                # Don't raise - return asset so user can retry
+
+            # Step 5: Attach license terms (non-critical, idempotent)
+            if story_ip_id:
+                self._step_attach_license(
+                    asset=asset,
+                    story_ip_id=story_ip_id,
+                    allow_derivatives=serializer.validated_data.get('allow_derivatives', True),
+                    commercial_use=serializer.validated_data.get('commercial_rights', False),
+                    royalty_percentage=serializer.validated_data.get('royalty_percentage', 0),
+                    story_service=story_service
+                )
 
             # Invalidate cache
             invalidate_asset_cache()
 
-            # Return created asset (even if Story Protocol registration failed)
+            # Return created asset (even if some steps failed)
             response_serializer = IPAssetDetailSerializer(asset)
             return Response(
                 response_serializer.data,
@@ -546,6 +693,197 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                 {
                     'error': 'Registration retry failed',
                     'detail': error_message
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def retry_creation(self, request, uuid=None):
+        """
+        Comprehensive retry endpoint that resumes asset creation from the failed step.
+        This method is idempotent - it checks what's already done and only executes remaining steps.
+        
+        Steps:
+        1. media_upload - Upload media to IPFS
+        2. db_save - Save to database (already done if we're retrying)
+        3. metadata_upload - Upload metadata to IPFS
+        4. story_registration - Register on Story Protocol
+        5. license_attachment - Attach license terms
+        6. completed - All done
+        """
+        asset = self.get_object()
+        
+        # Check if user owns the asset
+        if asset.creator != request.user:
+            return Response(
+                {'error': 'Permission denied'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Check if asset can be retried
+        if asset.registration_status == 'registered' and asset.creation_step == 'completed':
+            return Response(
+                {
+                    'error': 'Asset creation already completed',
+                    'detail': 'This asset has been successfully created and registered.'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get services
+        pinata_service = get_pinata_service()
+        story_service = get_story_service()
+        
+        if not story_service.is_ready():
+            return Response(
+                {
+                    'error': 'Story Protocol service not available',
+                    'detail': 'Please configure STORY_PROTOCOL_PRIVATE_KEY in settings'
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+        
+        # Determine starting step from failed_at_step or current creation_step
+        start_step = asset.failed_at_step or asset.creation_step
+        
+        logger.info(f"Retrying asset {asset.id} creation from step: {start_step}")
+        
+        try:
+            # Resume from the appropriate step
+            if start_step == 'media_upload':
+                # Need media file or URL - check if we have it stored
+                if not asset.media_url and not asset.media_ipfs_hash:
+                    return Response(
+                        {
+                            'error': 'Cannot retry media upload',
+                            'detail': 'Media file or URL is required. Please recreate the asset with media.'
+                        },
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                # If we have media_url but no hash, try to extract or skip
+                if asset.media_url and not asset.media_ipfs_hash:
+                    # Media URL exists, assume it's valid
+                    media_url = asset.media_url
+                    media_ipfs_hash = None
+                else:
+                    # Already uploaded, get from stored data
+                    media_url = asset.media_url
+                    media_ipfs_hash = asset.media_ipfs_hash
+                
+                # If we don't have a valid media_url, we can't proceed
+                if not media_url:
+                    return Response(
+                        {
+                            'error': 'Cannot retry media upload',
+                            'detail': 'Media URL is missing. Please recreate the asset.'
+                        },
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+            
+            # If we're past media_upload, ensure we have media_url
+            if start_step != 'media_upload' and not asset.media_url:
+                return Response(
+                    {
+                        'error': 'Cannot retry',
+                        'detail': 'Media URL is missing. Please recreate the asset.'
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            media_url = asset.media_url
+            
+            # Step 3: Upload metadata (if not already done)
+            if start_step in ['media_upload', 'db_save', 'metadata_upload']:
+                if not asset.metadata_hash:
+                    try:
+                        license_terms = {
+                            'allow_derivatives': asset.allow_derivatives,
+                            'commercial_rights': asset.commercial_rights,
+                            'royalty_percentage': asset.royalty_percentage,
+                        }
+                        
+                        metadata_uri, metadata_hash = self._step_upload_metadata(
+                            asset=asset,
+                            title=asset.title,
+                            description=asset.description,
+                            media_url=media_url,
+                            creator_address=request.user.wallet_address,
+                            license_terms=license_terms,
+                            pinata_service=pinata_service
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to upload metadata on retry: {str(e)}")
+                        asset.registration_status = 'failed'
+                        asset.registration_error = f"Failed to upload metadata to IPFS: {str(e)}"
+                        asset.failed_at_step = 'metadata_upload'
+                        asset.save(update_fields=['registration_status', 'registration_error', 'failed_at_step'])
+                        raise
+                else:
+                    # Metadata already uploaded, get from stored data
+                    metadata_uri = asset.step_data.get('metadata_upload', {}).get('uri', f"ipfs://{asset.metadata_hash}")
+                    metadata_hash = asset.metadata_hash
+            
+            # Step 4: Register on Story Protocol (if not already done)
+            if start_step in ['media_upload', 'db_save', 'metadata_upload', 'story_registration']:
+                if not asset.story_ip_id:
+                    try:
+                        story_ip_id = self._step_register_story_protocol(
+                            asset=asset,
+                            metadata_uri=metadata_uri,
+                            metadata_hash=metadata_hash,
+                            creator_address=request.user.wallet_address,
+                            allow_derivatives=asset.allow_derivatives,
+                            commercial_use=asset.commercial_rights,
+                            royalty_percentage=asset.royalty_percentage,
+                            story_service=story_service
+                        )
+                    except Exception as e:
+                        error_message = str(e)
+                        logger.error(f"Failed to register on Story Protocol on retry: {error_message}")
+                        asset.registration_status = 'failed'
+                        asset.registration_error = error_message
+                        asset.failed_at_step = 'story_registration'
+                        asset.save(update_fields=['registration_status', 'registration_error', 'failed_at_step'])
+                        raise
+                else:
+                    story_ip_id = asset.story_ip_id
+            
+            # Step 5: Attach license terms (non-critical)
+            if story_ip_id:
+                self._step_attach_license(
+                    asset=asset,
+                    story_ip_id=story_ip_id,
+                    allow_derivatives=asset.allow_derivatives,
+                    commercial_use=asset.commercial_rights,
+                    royalty_percentage=asset.royalty_percentage,
+                    story_service=story_service
+                )
+            
+            # Invalidate cache
+            invalidate_asset_cache()
+            
+            response_serializer = IPAssetDetailSerializer(asset)
+            return Response(
+                {
+                    'message': 'Asset creation retry completed successfully',
+                    'asset': response_serializer.data,
+                    'resumed_from_step': start_step,
+                    'completed_steps': asset.creation_step
+                },
+                status=status.HTTP_200_OK
+            )
+            
+        except Exception as e:
+            error_message = str(e)
+            logger.error(f"Retry creation failed for asset {asset.id}: {error_message}")
+            
+            return Response(
+                {
+                    'error': 'Creation retry failed',
+                    'detail': error_message,
+                    'failed_at_step': asset.failed_at_step or asset.creation_step,
+                    'asset': IPAssetDetailSerializer(asset).data
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )

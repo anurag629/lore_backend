@@ -51,6 +51,46 @@ class IPAsset(models.Model):
         help_text="IPFS hash of metadata JSON"
     )
 
+    # Creation step tracking for retry functionality
+    CREATION_STEPS = [
+        ('media_upload', 'Media Upload to IPFS'),
+        ('db_save', 'Database Save'),
+        ('metadata_upload', 'Metadata Upload to IPFS'),
+        ('story_registration', 'Story Protocol Registration'),
+        ('license_attachment', 'License Terms Attachment'),
+        ('completed', 'Completed'),
+    ]
+    
+    creation_step = models.CharField(
+        max_length=30,
+        choices=CREATION_STEPS,
+        default='media_upload',
+        db_index=True,
+        help_text="Current step in the creation process"
+    )
+    
+    failed_at_step = models.CharField(
+        max_length=30,
+        choices=CREATION_STEPS,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Step where creation failed (if any)"
+    )
+    
+    media_ipfs_hash = models.CharField(
+        max_length=66,
+        blank=True,
+        null=True,
+        help_text="IPFS hash of the media file (for retry purposes)"
+    )
+    
+    step_data = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Stores intermediate results from each creation step (IPFS URLs, hashes, etc.)"
+    )
+
     is_derivative = models.BooleanField(
         default=False,
         help_text="Whether this asset is a derivative/remix"
@@ -135,6 +175,8 @@ class IPAsset(models.Model):
             models.Index(fields=['created_at']),
             models.Index(fields=['story_ip_id']),
             models.Index(fields=['registration_status', '-created_at']),
+            models.Index(fields=['creation_step', 'registration_status']),
+            models.Index(fields=['failed_at_step']),
         ]
 
     def __str__(self):

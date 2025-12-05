@@ -100,6 +100,9 @@ class IPAssetDetailSerializer(serializers.ModelSerializer):
             'registration_error',
             'registration_attempts',
             'last_registration_attempt',
+            'creation_step',
+            'failed_at_step',
+            'step_data',
             'created_at',
             'updated_at',
         ]

@@ -148,20 +148,14 @@ class Command(BaseCommand):
             )
             return
 
-        # Create superuser
+        # Create superuser using the manager's create_superuser method
         try:
-            superuser = LoreUser.objects.create(
+            superuser = LoreUser.objects.create_superuser(
                 wallet_address=wallet_address,
-                username=username,
                 email=email,
-                is_staff=True,
-                is_superuser=True,
-                is_active=True,
+                password=password,
+                username=username,  # Optional field
             )
-
-            # Set password for Django admin login
-            superuser.set_password(password)
-            superuser.save()
 
             self.stdout.write(
                 self.style.SUCCESS(

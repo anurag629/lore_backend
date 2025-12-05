@@ -20,9 +20,11 @@ urlpatterns = [
     path('api/', include(router.urls)),
     path('api/auth/', include('apps.core.urls')),
     path('api/assets/', include('apps.assets.urls')),
+    path('api/ai/', include('apps.ai.urls')),
+    path('api/collections/', include('apps.collections.urls')),
     path('api/social/', include('apps.social.urls')),
     # Health check endpoints (at root level for easy access)
-    path('api/health/', include('apps.core.urls')),
+    path('api/health/', include('apps.core.health_urls')),
     
     # API Documentation
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),

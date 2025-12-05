@@ -1,9 +1,9 @@
 """
-Serializers for Collections feature.
+Serializers for Collections and Favorites features.
 """
 from rest_framework import serializers
-from .models import Collection
-from .serializers import IPAssetListSerializer
+from .models import Collection, Favorite
+from apps.assets.serializers import IPAssetListSerializer
 from apps.core.serializers import CreatorSerializer
 
 
@@ -103,7 +103,7 @@ class CollectionCreateSerializer(serializers.ModelSerializer):
         
         # Add assets to collection
         if asset_ids:
-            from .models import IPAsset
+            from apps.assets.models import IPAsset
             assets = IPAsset.objects.filter(
                 id__in=asset_ids,
                 is_deleted=False
@@ -144,7 +144,7 @@ class CollectionUpdateSerializer(serializers.ModelSerializer):
         
         # Update assets if provided
         if asset_ids is not None:
-            from .models import IPAsset
+            from apps.assets.models import IPAsset
             assets = IPAsset.objects.filter(
                 id__in=asset_ids,
                 is_deleted=False
@@ -152,4 +152,40 @@ class CollectionUpdateSerializer(serializers.ModelSerializer):
             instance.assets.set(assets)
         
         return instance
+
+
+class FavoriteSerializer(serializers.ModelSerializer):
+    """Serializer for Favorite model."""
+    
+    asset = serializers.SerializerMethodField()
+    user = CreatorSerializer(read_only=True)
+
+    class Meta:
+        model = Favorite
+        fields = [
+            'id',
+            'user',
+            'asset',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_asset(self, obj):
+        """Get asset details."""
+        return IPAssetListSerializer(obj.asset).data
+
+
+class FavoriteCreateSerializer(serializers.Serializer):
+    """Serializer for creating a favorite."""
+    
+    asset_id = serializers.IntegerField(required=True)
+
+    def validate_asset_id(self, value):
+        """Validate that asset exists and is not deleted."""
+        from apps.assets.models import IPAsset
+        try:
+            asset = IPAsset.objects.get(id=value, is_deleted=False)
+            return value
+        except IPAsset.DoesNotExist:
+            raise serializers.ValidationError("Asset not found")
 

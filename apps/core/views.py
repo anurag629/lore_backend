@@ -179,7 +179,7 @@ def upload_avatar(request):
         )
     
     try:
-        from apps.assets.pinata_service import get_pinata_service
+        from apps.assets.services import get_pinata_service
         
         pinata_service = get_pinata_service()
         result = pinata_service.upload_file(
@@ -240,7 +240,7 @@ def upload_banner(request):
         )
     
     try:
-        from apps.assets.pinata_service import get_pinata_service
+        from apps.assets.services import get_pinata_service
         
         pinata_service = get_pinata_service()
         result = pinata_service.upload_file(
@@ -388,7 +388,7 @@ def _check_cache():
 def _check_story_protocol():
     """Check Story Protocol service."""
     try:
-        from apps.assets.story_service import get_story_service
+        from apps.assets.services import get_story_service
         service = get_story_service()
         if service.is_ready():
             return {'status': 'healthy'}
@@ -401,7 +401,7 @@ def _check_story_protocol():
 def _check_pinata():
     """Check Pinata IPFS service."""
     try:
-        from apps.assets.pinata_service import get_pinata_service
+        from apps.assets.services import get_pinata_service
         service = get_pinata_service()
         if service.test_connection():
             return {'status': 'healthy'}
@@ -414,7 +414,7 @@ def _check_pinata():
 def _check_ai_service():
     """Check AI service."""
     try:
-        from apps.assets.ai_service import get_ai_service
+        from apps.ai.services import get_ai_service
         service = get_ai_service()
         if service.is_ready():
             return {'status': 'healthy'}

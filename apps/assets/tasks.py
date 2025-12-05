@@ -7,7 +7,7 @@ from django.db import transaction
 import logging
 
 from .models import IPAsset, RoyaltyPayment
-from .story_service import get_story_service
+from .services import get_story_service
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,7 @@ def cleanup_old_logs():
     Keeps logs for last 90 days, deletes older ones.
     """
     try:
-        from .models import AIGenerationLog
+        from apps.ai.models import AIGenerationLog
         
         cutoff_date = timezone.now() - timezone.timedelta(days=90)
         deleted_count, _ = AIGenerationLog.objects.filter(

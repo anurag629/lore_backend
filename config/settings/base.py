@@ -40,6 +40,8 @@ INSTALLED_APPS = [
     # Local apps
     'apps.core.apps.CoreConfig',
     'apps.assets.apps.AssetsConfig',
+    'apps.ai.apps.AIConfig',
+    'apps.collections.apps.CollectionsConfig',
     'apps.social.apps.SocialConfig',
 ]
 

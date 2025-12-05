@@ -145,3 +145,32 @@ class Comment(models.Model):
         self.is_deleted = True
         self.deleted_at = timezone.now()
         self.save(update_fields=['is_deleted', 'deleted_at'])
+
+
+class CommentLike(models.Model):
+    """
+    Tracks likes on comments.
+    """
+    comment = models.ForeignKey(
+        Comment,
+        on_delete=models.CASCADE,
+        related_name='likes',
+        help_text="Comment being liked"
+    )
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='comment_likes',
+        help_text="User who liked the comment"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Comment Like"
+        verbose_name_plural = "Comment Likes"
+        unique_together = [['comment', 'user']]
+
+    def __str__(self):
+        return f"{self.user} likes {self.comment}"

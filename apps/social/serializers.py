@@ -26,6 +26,8 @@ class CommentSerializer(serializers.ModelSerializer):
     user = CommentUserSerializer(read_only=True)
     reply_count = serializers.SerializerMethodField()
     is_own_comment = serializers.SerializerMethodField()
+    is_liked = serializers.SerializerMethodField()
+    like_count = serializers.SerializerMethodField()
     asset = serializers.UUIDField(source='asset.uuid', read_only=True)
     parent = serializers.SerializerMethodField()
     
@@ -40,10 +42,12 @@ class CommentSerializer(serializers.ModelSerializer):
             'reply_count',
             'is_deleted',
             'is_own_comment',
+            'is_liked',
+            'like_count',
             'created_at',
             'updated_at',
         ]
-        read_only_fields = ['id', 'user', 'created_at', 'updated_at', 'reply_count', 'is_own_comment']
+        read_only_fields = ['id', 'user', 'created_at', 'updated_at', 'reply_count', 'is_own_comment', 'is_liked', 'like_count']
     
     def get_reply_count(self, obj):
         """Get reply count from annotation or property."""
@@ -65,6 +69,22 @@ class CommentSerializer(serializers.ModelSerializer):
         if request and request.user.is_authenticated:
             return obj.user == request.user
         return False
+    
+    def get_is_liked(self, obj):
+        """Check if current user liked this comment."""
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            # Check for prefetched/annotated likes
+            if hasattr(obj, 'is_liked_annotated'):
+                return obj.is_liked_annotated
+            return obj.likes.filter(user=request.user).exists()
+        return False
+    
+    def get_like_count(self, obj):
+        """Get total like count."""
+        if hasattr(obj, 'like_count_annotated'):
+            return obj.like_count_annotated
+        return obj.likes.count()
 
 
 class CommentCreateSerializer(serializers.ModelSerializer):

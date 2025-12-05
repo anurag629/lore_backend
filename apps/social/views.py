@@ -62,10 +62,25 @@ class CommentViewSet(viewsets.ModelViewSet):
             # Only top-level comments by default
             queryset = queryset.filter(parent__isnull=True)
         
-        # Annotate reply counts (named differently to avoid conflict with model property)
+        # Annotate reply counts and like counts
         queryset = queryset.annotate(
-            reply_count_annotated=Count('replies', filter=Q(replies__is_deleted=False))
+            reply_count_annotated=Count('replies', filter=Q(replies__is_deleted=False)),
+            like_count_annotated=Count('likes', distinct=True)
         )
+        
+        # Annotate is_liked if user is authenticated
+        if self.request.user.is_authenticated:
+            # We can't easily perform a subquery annotation compatible with all DB backends for boolean
+            # So we'll use a Prefetch or handle it in the serializer via 'likes' relation
+            # But for performance on list views, Exists() subquery is best
+            from django.db.models import Exists, OuterRef
+            from .models import CommentLike
+            
+            is_liked_subquery = CommentLike.objects.filter(
+                comment=OuterRef('pk'),
+                user=self.request.user
+            )
+            queryset = queryset.annotate(is_liked_annotated=Exists(is_liked_subquery))
         
         return queryset.order_by('created_at')
     
@@ -94,28 +109,38 @@ class CommentViewSet(viewsets.ModelViewSet):
         ).filter(
             parent=comment,
             is_deleted=False
+        ).annotate(
+            like_count_annotated=Count('likes', distinct=True)
         ).order_by('created_at')
+        
+        if request.user.is_authenticated:
+            from django.db.models import Exists, OuterRef
+            from .models import CommentLike
+            is_liked_subquery = CommentLike.objects.filter(
+                comment=OuterRef('pk'),
+                user=request.user
+            )
+            replies = replies.annotate(is_liked_annotated=Exists(is_liked_subquery))
         
         serializer = self.get_serializer(replies, many=True)
         return Response(serializer.data)
     
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def like(self, request, uuid=None):
-        """Like/unlike a comment (using Interaction model)."""
+        """Like/unlike a comment (using CommentLike model)."""
         comment = self.get_object()
         user = request.user
+        from .models import CommentLike
         
         # Check if user already liked this comment
-        interaction, created = Interaction.objects.get_or_create(
+        like_obj, created = CommentLike.objects.get_or_create(
             user=user,
-            asset=comment.asset,
-            type='like',
-            defaults={}
+            comment=comment
         )
         
         if not created:
-            # Unlike: delete the interaction
-            interaction.delete()
+            # Unlike: delete the like object
+            like_obj.delete()
             return Response({'liked': False}, status=status.HTTP_200_OK)
         
         return Response({'liked': True}, status=status.HTTP_201_CREATED)

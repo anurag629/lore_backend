@@ -31,6 +31,7 @@ class CommentViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticatedOrReadOnly]
     # Use UUID for lookups instead of integer pk
     lookup_field = 'uuid'
+    lookup_url_kwarg = 'uuid'
     
     def get_queryset(self):
         """Get comments for an asset, excluding deleted ones."""
@@ -42,25 +43,32 @@ class CommentViewSet(viewsets.ModelViewSet):
             is_deleted=False
         )
         
-        # Filter by asset UUID if provided
-        asset_id = self.request.query_params.get('asset')
-        if asset_id:
-            try:
-                queryset = queryset.filter(asset__uuid=asset_id)
-            except ValueError:
-                # Invalid UUID, return empty queryset
-                queryset = queryset.none()
-        
-        # Filter by parent UUID (for replies)
-        parent_id = self.request.query_params.get('parent')
-        if parent_id:
-            try:
-                queryset = queryset.filter(parent__uuid=parent_id)
-            except ValueError:
-                queryset = queryset.none()
+        # For detail actions (retrieve, replies, like), don't filter by parent
+        # This allows looking up any comment by UUID regardless of whether it's a reply
+        if self.action in ['retrieve', 'replies', 'like', 'update', 'partial_update', 'destroy']:
+            # No parent filtering for detail actions - just return non-deleted comments
+            pass
         else:
-            # Only top-level comments by default
-            queryset = queryset.filter(parent__isnull=True)
+            # For list action, apply filters
+            # Filter by asset UUID if provided
+            asset_id = self.request.query_params.get('asset')
+            if asset_id:
+                try:
+                    queryset = queryset.filter(asset__uuid=asset_id)
+                except ValueError:
+                    # Invalid UUID, return empty queryset
+                    queryset = queryset.none()
+            
+            # Filter by parent UUID (for replies)
+            parent_id = self.request.query_params.get('parent')
+            if parent_id:
+                try:
+                    queryset = queryset.filter(parent__uuid=parent_id)
+                except ValueError:
+                    queryset = queryset.none()
+            else:
+                # Only top-level comments by default for list
+                queryset = queryset.filter(parent__isnull=True)
         
         # Annotate reply counts and like counts
         queryset = queryset.annotate(
@@ -96,11 +104,23 @@ class CommentViewSet(viewsets.ModelViewSet):
         """Create comment with current user."""
         serializer.save(user=self.request.user)
     
+    def create(self, request, *args, **kwargs):
+        """Create comment and return full comment object."""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        
+        # Return the created comment using the detail serializer
+        instance = serializer.instance
+        detail_serializer = CommentSerializer(instance, context={'request': request})
+        headers = self.get_success_headers(detail_serializer.data)
+        return Response(detail_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+    
     def perform_destroy(self, instance):
         """Soft delete comment instead of hard delete."""
         instance.soft_delete()
     
-    @action(detail=True, methods=['get'])
+    @action(detail=True, methods=['get'], url_path='replies')
     def replies(self, request, uuid=None):
         """Get replies to a specific comment."""
         comment = self.get_object()
@@ -125,7 +145,7 @@ class CommentViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(replies, many=True)
         return Response(serializer.data)
     
-    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated], url_path='like')
     def like(self, request, uuid=None):
         """Like/unlike a comment (using CommentLike model)."""
         comment = self.get_object()

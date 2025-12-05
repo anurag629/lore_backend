@@ -59,9 +59,9 @@ class CollectionViewSet(viewsets.ModelViewSet):
                 Q(is_public=True) | Q(creator=self.request.user)
             )
         
-        # Annotate asset count
+        # Annotate asset count (named differently to avoid conflict with model property)
         queryset = queryset.annotate(
-            asset_count=Count('assets', filter=Q(assets__is_deleted=False))
+            asset_count_annotated=Count('assets', filter=Q(assets__is_deleted=False))
         )
         
         return queryset.order_by('-created_at')

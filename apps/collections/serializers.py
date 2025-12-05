@@ -11,8 +11,16 @@ class CollectionListSerializer(serializers.ModelSerializer):
     """Serializer for listing collections."""
     
     creator = CreatorSerializer(read_only=True)
-    asset_count = serializers.IntegerField(read_only=True)
+    asset_count = serializers.SerializerMethodField()
     cover_image_url = serializers.SerializerMethodField()
+
+    def get_asset_count(self, obj):
+        """Get asset count from annotation or property."""
+        # Use annotated value if available (from optimized queryset)
+        if hasattr(obj, 'asset_count_annotated'):
+            return obj.asset_count_annotated
+        # Fallback to model property
+        return obj.asset_count
 
     class Meta:
         model = Collection
@@ -47,7 +55,15 @@ class CollectionDetailSerializer(serializers.ModelSerializer):
     
     creator = CreatorSerializer(read_only=True)
     assets = serializers.SerializerMethodField()
-    asset_count = serializers.IntegerField(read_only=True)
+    asset_count = serializers.SerializerMethodField()
+
+    def get_asset_count(self, obj):
+        """Get asset count from annotation or property."""
+        # Use annotated value if available (from optimized queryset)
+        if hasattr(obj, 'asset_count_annotated'):
+            return obj.asset_count_annotated
+        # Fallback to model property
+        return obj.asset_count
 
     class Meta:
         model = Collection
@@ -94,12 +110,9 @@ class CollectionCreateSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         """Create collection and add assets."""
         asset_ids = validated_data.pop('asset_ids', [])
-        creator = self.context['request'].user
         
-        collection = Collection.objects.create(
-            creator=creator,
-            **validated_data
-        )
+        # creator is passed via serializer.save(creator=user) in the view
+        collection = Collection.objects.create(**validated_data)
         
         # Add assets to collection
         if asset_ids:

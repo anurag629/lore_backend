@@ -62,9 +62,9 @@ class CommentViewSet(viewsets.ModelViewSet):
             # Only top-level comments by default
             queryset = queryset.filter(parent__isnull=True)
         
-        # Annotate reply counts
+        # Annotate reply counts (named differently to avoid conflict with model property)
         queryset = queryset.annotate(
-            reply_count=Count('replies', filter=Q(replies__is_deleted=False))
+            reply_count_annotated=Count('replies', filter=Q(replies__is_deleted=False))
         )
         
         return queryset.order_by('created_at')

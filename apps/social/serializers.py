@@ -24,7 +24,7 @@ class CommentSerializer(serializers.ModelSerializer):
     
     id = serializers.UUIDField(source='uuid', read_only=True)
     user = CommentUserSerializer(read_only=True)
-    reply_count = serializers.IntegerField(read_only=True)
+    reply_count = serializers.SerializerMethodField()
     is_own_comment = serializers.SerializerMethodField()
     asset = serializers.UUIDField(source='asset.uuid', read_only=True)
     parent = serializers.SerializerMethodField()
@@ -44,6 +44,14 @@ class CommentSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
         read_only_fields = ['id', 'user', 'created_at', 'updated_at', 'reply_count', 'is_own_comment']
+    
+    def get_reply_count(self, obj):
+        """Get reply count from annotation or property."""
+        # Use annotated value if available (from optimized queryset)
+        if hasattr(obj, 'reply_count_annotated'):
+            return obj.reply_count_annotated
+        # Fallback to model property
+        return obj.reply_count
     
     def get_parent(self, obj):
         """Get parent comment UUID."""

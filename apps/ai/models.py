@@ -1,3 +1,4 @@
+import uuid
 from django.db import models
 from django.conf import settings
 
@@ -7,6 +8,14 @@ class AIGenerationLog(models.Model):
     Audit trail for all AI generation requests.
     Tracks what was requested, what was generated, and performance metrics.
     """
+    uuid = models.UUIDField(
+        default=uuid.uuid4,
+        editable=False,
+        unique=True,
+        db_index=True,
+        help_text="Public UUID for API access"
+    )
+
     OPERATION_CHOICES = [
         ('title', 'Title Generation'),
         ('description', 'Description Enhancement'),
@@ -113,6 +122,14 @@ class AIAssetMetadata(models.Model):
     Stores AI-generated metadata that was accepted and used for an asset.
     Links to IPAsset to track which AI-generated content was actually used.
     """
+    uuid = models.UUIDField(
+        default=uuid.uuid4,
+        editable=False,
+        unique=True,
+        db_index=True,
+        help_text="Public UUID for API access"
+    )
+
     CONTENT_TYPE_CHOICES = [
         ('title', 'Title'),
         ('description', 'Description'),

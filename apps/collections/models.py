@@ -1,3 +1,4 @@
+import uuid
 from django.db import models
 from django.conf import settings
 
@@ -7,6 +8,14 @@ class Collection(models.Model):
     A curated collection of IP assets created by users.
     Users can organize their favorite assets into collections.
     """
+    uuid = models.UUIDField(
+        default=uuid.uuid4,
+        editable=False,
+        unique=True,
+        db_index=True,
+        help_text="Public UUID for API access"
+    )
+
     creator = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -67,6 +76,14 @@ class Favorite(models.Model):
     """
     User favorites/bookmarks for IP assets.
     """
+    uuid = models.UUIDField(
+        default=uuid.uuid4,
+        editable=False,
+        unique=True,
+        db_index=True,
+        help_text="Public UUID for API access"
+    )
+
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,

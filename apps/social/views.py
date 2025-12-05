@@ -29,6 +29,8 @@ class CommentViewSet(viewsets.ModelViewSet):
     """
     
     permission_classes = [IsAuthenticatedOrReadOnly]
+    # Use UUID for lookups instead of integer pk
+    lookup_field = 'uuid'
     
     def get_queryset(self):
         """Get comments for an asset, excluding deleted ones."""
@@ -40,15 +42,22 @@ class CommentViewSet(viewsets.ModelViewSet):
             is_deleted=False
         )
         
-        # Filter by asset if provided
+        # Filter by asset UUID if provided
         asset_id = self.request.query_params.get('asset')
         if asset_id:
-            queryset = queryset.filter(asset_id=asset_id)
+            try:
+                queryset = queryset.filter(asset__uuid=asset_id)
+            except ValueError:
+                # Invalid UUID, return empty queryset
+                queryset = queryset.none()
         
-        # Filter by parent (for replies)
+        # Filter by parent UUID (for replies)
         parent_id = self.request.query_params.get('parent')
         if parent_id:
-            queryset = queryset.filter(parent_id=parent_id)
+            try:
+                queryset = queryset.filter(parent__uuid=parent_id)
+            except ValueError:
+                queryset = queryset.none()
         else:
             # Only top-level comments by default
             queryset = queryset.filter(parent__isnull=True)
@@ -77,7 +86,7 @@ class CommentViewSet(viewsets.ModelViewSet):
         instance.soft_delete()
     
     @action(detail=True, methods=['get'])
-    def replies(self, request, pk=None):
+    def replies(self, request, uuid=None):
         """Get replies to a specific comment."""
         comment = self.get_object()
         replies = Comment.objects.select_related(
@@ -91,7 +100,7 @@ class CommentViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
     
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
-    def like(self, request, pk=None):
+    def like(self, request, uuid=None):
         """Like/unlike a comment (using Interaction model)."""
         comment = self.get_object()
         user = request.user
@@ -120,6 +129,8 @@ class InteractionViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Interaction.objects.select_related('user', 'asset').all()
     serializer_class = InteractionSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
+    # Use UUID for lookups instead of integer pk
+    lookup_field = 'uuid'
     
     def get_queryset(self):
         """Filter interactions by asset if provided."""
@@ -127,11 +138,13 @@ class InteractionViewSet(viewsets.ReadOnlyModelViewSet):
         
         asset_id = self.request.query_params.get('asset')
         if asset_id:
-            queryset = queryset.filter(asset_id=asset_id)
+            try:
+                queryset = queryset.filter(asset__uuid=asset_id)
+            except ValueError:
+                queryset = queryset.none()
         
         interaction_type = self.request.query_params.get('type')
         if interaction_type:
             queryset = queryset.filter(type=interaction_type)
         
         return queryset.order_by('-created_at')
-

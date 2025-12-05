@@ -10,6 +10,7 @@ from apps.core.serializers import CreatorSerializer
 class CollectionListSerializer(serializers.ModelSerializer):
     """Serializer for listing collections."""
     
+    id = serializers.UUIDField(source='uuid', read_only=True)
     creator = CreatorSerializer(read_only=True)
     asset_count = serializers.SerializerMethodField()
     cover_image_url = serializers.SerializerMethodField()
@@ -53,6 +54,7 @@ class CollectionListSerializer(serializers.ModelSerializer):
 class CollectionDetailSerializer(serializers.ModelSerializer):
     """Detailed serializer for collection view."""
     
+    id = serializers.UUIDField(source='uuid', read_only=True)
     creator = CreatorSerializer(read_only=True)
     assets = serializers.SerializerMethodField()
     asset_count = serializers.SerializerMethodField()
@@ -91,10 +93,10 @@ class CollectionCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating a new collection."""
     
     asset_ids = serializers.ListField(
-        child=serializers.IntegerField(),
+        child=serializers.UUIDField(),
         required=False,
         allow_empty=True,
-        help_text="List of asset IDs to add to collection"
+        help_text="List of asset UUIDs to add to collection"
     )
 
     class Meta:
@@ -114,11 +116,11 @@ class CollectionCreateSerializer(serializers.ModelSerializer):
         # creator is passed via serializer.save(creator=user) in the view
         collection = Collection.objects.create(**validated_data)
         
-        # Add assets to collection
+        # Add assets to collection by UUID
         if asset_ids:
             from apps.assets.models import IPAsset
             assets = IPAsset.objects.filter(
-                id__in=asset_ids,
+                uuid__in=asset_ids,
                 is_deleted=False
             )
             collection.assets.set(assets)
@@ -130,10 +132,10 @@ class CollectionUpdateSerializer(serializers.ModelSerializer):
     """Serializer for updating a collection."""
     
     asset_ids = serializers.ListField(
-        child=serializers.IntegerField(),
+        child=serializers.UUIDField(),
         required=False,
         allow_empty=True,
-        help_text="List of asset IDs to replace collection assets"
+        help_text="List of asset UUIDs to replace collection assets"
     )
 
     class Meta:
@@ -155,11 +157,11 @@ class CollectionUpdateSerializer(serializers.ModelSerializer):
             setattr(instance, attr, value)
         instance.save()
         
-        # Update assets if provided
+        # Update assets if provided (by UUID)
         if asset_ids is not None:
             from apps.assets.models import IPAsset
             assets = IPAsset.objects.filter(
-                id__in=asset_ids,
+                uuid__in=asset_ids,
                 is_deleted=False
             )
             instance.assets.set(assets)
@@ -170,6 +172,7 @@ class CollectionUpdateSerializer(serializers.ModelSerializer):
 class FavoriteSerializer(serializers.ModelSerializer):
     """Serializer for Favorite model."""
     
+    id = serializers.UUIDField(source='uuid', read_only=True)
     asset = serializers.SerializerMethodField()
     user = CreatorSerializer(read_only=True)
 
@@ -191,14 +194,13 @@ class FavoriteSerializer(serializers.ModelSerializer):
 class FavoriteCreateSerializer(serializers.Serializer):
     """Serializer for creating a favorite."""
     
-    asset_id = serializers.IntegerField(required=True)
+    asset_id = serializers.UUIDField(required=True)
 
     def validate_asset_id(self, value):
         """Validate that asset exists and is not deleted."""
         from apps.assets.models import IPAsset
         try:
-            asset = IPAsset.objects.get(id=value, is_deleted=False)
+            asset = IPAsset.objects.get(uuid=value, is_deleted=False)
             return value
         except IPAsset.DoesNotExist:
             raise serializers.ValidationError("Asset not found")
-

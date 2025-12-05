@@ -29,6 +29,8 @@ class CollectionViewSet(viewsets.ModelViewSet):
     """
     queryset = Collection.objects.select_related('creator').prefetch_related('assets').all()
     permission_classes = [IsAuthenticatedOrReadOnly]
+    # Use UUID for lookups instead of integer pk
+    lookup_field = 'uuid'
 
     def get_serializer_class(self):
         """Return appropriate serializer based on action."""
@@ -104,7 +106,7 @@ class CollectionViewSet(viewsets.ModelViewSet):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
-    def add_asset(self, request, pk=None):
+    def add_asset(self, request, uuid=None):
         """Add an asset to the collection."""
         collection = self.get_object()
         
@@ -115,7 +117,7 @@ class CollectionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
         
-        asset_id = request.data.get('asset_id')
+        asset_id = request.data.get('asset_id')  # Now expects UUID
         if not asset_id:
             return Response(
                 {'error': 'asset_id is required'},
@@ -124,18 +126,18 @@ class CollectionViewSet(viewsets.ModelViewSet):
         
         from apps.assets.models import IPAsset
         try:
-            asset = IPAsset.objects.get(id=asset_id, is_deleted=False)
+            asset = IPAsset.objects.get(uuid=asset_id, is_deleted=False)
             collection.assets.add(asset)
             invalidate_user_profile_cache(request.user.wallet_address)
             return Response({'success': True}, status=status.HTTP_200_OK)
-        except IPAsset.DoesNotExist:
+        except (IPAsset.DoesNotExist, ValueError):
             return Response(
                 {'error': 'Asset not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
-    def remove_asset(self, request, pk=None):
+    def remove_asset(self, request, uuid=None):
         """Remove an asset from the collection."""
         collection = self.get_object()
         
@@ -146,7 +148,7 @@ class CollectionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
         
-        asset_id = request.data.get('asset_id')
+        asset_id = request.data.get('asset_id')  # Now expects UUID
         if not asset_id:
             return Response(
                 {'error': 'asset_id is required'},
@@ -155,11 +157,11 @@ class CollectionViewSet(viewsets.ModelViewSet):
         
         from apps.assets.models import IPAsset
         try:
-            asset = IPAsset.objects.get(id=asset_id)
+            asset = IPAsset.objects.get(uuid=asset_id)
             collection.assets.remove(asset)
             invalidate_user_profile_cache(request.user.wallet_address)
             return Response({'success': True}, status=status.HTTP_200_OK)
-        except IPAsset.DoesNotExist:
+        except (IPAsset.DoesNotExist, ValueError):
             return Response(
                 {'error': 'Asset not found'},
                 status=status.HTTP_404_NOT_FOUND
@@ -173,6 +175,8 @@ class FavoriteViewSet(viewsets.ModelViewSet):
     queryset = Favorite.objects.select_related('user', 'asset', 'asset__creator').all()
     permission_classes = [IsAuthenticated]
     serializer_class = FavoriteSerializer
+    # Use UUID for lookups instead of integer pk
+    lookup_field = 'uuid'
 
     def get_queryset(self):
         """Get queryset filtered by current user."""
@@ -194,9 +198,9 @@ class FavoriteViewSet(viewsets.ModelViewSet):
         serializer = FavoriteCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
-        asset_id = serializer.validated_data['asset_id']
+        asset_uuid = serializer.validated_data['asset_id']  # Now a UUID
         from apps.assets.models import IPAsset
-        asset = IPAsset.objects.get(id=asset_id, is_deleted=False)
+        asset = IPAsset.objects.get(uuid=asset_uuid, is_deleted=False)
         
         # Check if already favorited
         favorite, created = Favorite.objects.get_or_create(
@@ -223,9 +227,9 @@ class FavoriteViewSet(viewsets.ModelViewSet):
         serializer = FavoriteCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
-        asset_id = serializer.validated_data['asset_id']
+        asset_uuid = serializer.validated_data['asset_id']  # Now a UUID
         from apps.assets.models import IPAsset
-        asset = IPAsset.objects.get(id=asset_id, is_deleted=False)
+        asset = IPAsset.objects.get(uuid=asset_uuid, is_deleted=False)
         
         try:
             favorite = Favorite.objects.get(user=request.user, asset=asset)
@@ -250,7 +254,7 @@ class FavoriteViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], url_path='check')
     def check_favorite(self, request):
         """Check if an asset is favorited by current user."""
-        asset_id = request.query_params.get('asset_id')
+        asset_id = request.query_params.get('asset_id')  # Now expects UUID
         if not asset_id:
             return Response(
                 {'error': 'asset_id is required'},
@@ -259,7 +263,7 @@ class FavoriteViewSet(viewsets.ModelViewSet):
         
         from apps.assets.models import IPAsset
         try:
-            asset = IPAsset.objects.get(id=asset_id, is_deleted=False)
+            asset = IPAsset.objects.get(uuid=asset_id, is_deleted=False)
             is_favorited = Favorite.objects.filter(
                 user=request.user,
                 asset=asset
@@ -269,7 +273,7 @@ class FavoriteViewSet(viewsets.ModelViewSet):
                 {'favorited': is_favorited},
                 status=status.HTTP_200_OK
             )
-        except IPAsset.DoesNotExist:
+        except (IPAsset.DoesNotExist, ValueError):
             return Response(
                 {'error': 'Asset not found'},
                 status=status.HTTP_404_NOT_FOUND

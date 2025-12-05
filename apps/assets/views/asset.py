@@ -61,6 +61,8 @@ class IPAssetViewSet(viewsets.ModelViewSet):
         SearchFilter,
         OrderingFilter,
     ]
+    # Use UUID for lookups instead of integer pk
+    lookup_field = 'uuid'
 
     def get_serializer_class(self):
         """Return appropriate serializer based on action."""
@@ -174,10 +176,10 @@ class IPAssetViewSet(viewsets.ModelViewSet):
         """
         Retrieve asset with caching.
         """
-        asset_id = kwargs.get('pk')
+        asset_uuid = kwargs.get('uuid')
         
         # Try to get from cache
-        cached_response = get_cached_asset_detail(asset_id)
+        cached_response = get_cached_asset_detail(asset_uuid)
         if cached_response:
             return Response(cached_response)
         
@@ -186,7 +188,7 @@ class IPAssetViewSet(viewsets.ModelViewSet):
         
         # Cache the response
         if response.status_code == 200:
-            cache_asset_detail(asset_id, response.data)
+            cache_asset_detail(asset_uuid, response.data)
         
         return response
 
@@ -194,16 +196,16 @@ class IPAssetViewSet(viewsets.ModelViewSet):
         """Update asset with cache invalidation."""
         response = super().update(request, *args, **kwargs)
         if response.status_code == 200:
-            asset_id = kwargs.get('pk')
-            invalidate_asset_cache(asset_id)
+            asset_uuid = kwargs.get('uuid')
+            invalidate_asset_cache(asset_uuid)
         return response
 
     def partial_update(self, request, *args, **kwargs):
         """Partial update asset with cache invalidation."""
         response = super().partial_update(request, *args, **kwargs)
         if response.status_code == 200:
-            asset_id = kwargs.get('pk')
-            invalidate_asset_cache(asset_id)
+            asset_uuid = kwargs.get('uuid')
+            invalidate_asset_cache(asset_uuid)
         return response
 
     def destroy(self, request, *args, **kwargs):
@@ -418,7 +420,7 @@ class IPAssetViewSet(viewsets.ModelViewSet):
             )
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
-    def retry_registration(self, request, pk=None):
+    def retry_registration(self, request, uuid=None):
         """
         Retry Story Protocol registration for a failed asset.
         Only works for assets with registration_status='failed'.
@@ -698,7 +700,7 @@ class IPAssetViewSet(viewsets.ModelViewSet):
             )
 
     @action(detail=True, methods=['get'])
-    def derivatives(self, request, pk=None):
+    def derivatives(self, request, uuid=None):
         """Get all derivatives of an IP asset."""
         asset = self.get_object()
         # Optimize query with select_related for creator
@@ -707,7 +709,7 @@ class IPAssetViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
-    def claim_royalties(self, request, pk=None):
+    def claim_royalties(self, request, uuid=None):
         """
         Claim accumulated royalties for an IP asset.
         Only the creator can claim royalties.
@@ -770,7 +772,7 @@ class IPAssetViewSet(viewsets.ModelViewSet):
             )
 
     @action(detail=True, methods=['get'])
-    def royalty_balance(self, request, pk=None):
+    def royalty_balance(self, request, uuid=None):
         """Get current royalty balance for an IP asset."""
         asset = self.get_object()
 

@@ -1,3 +1,4 @@
+import uuid
 from django.db import models
 from django.conf import settings
 
@@ -7,6 +8,14 @@ class IPAsset(models.Model):
     Represents an intellectual property asset registered on Story Protocol.
     Can be original content or a derivative (remix/spin-off).
     """
+    uuid = models.UUIDField(
+        default=uuid.uuid4,
+        editable=False,
+        unique=True,
+        db_index=True,
+        help_text="Public UUID for API access"
+    )
+
     story_ip_id = models.CharField(
         max_length=66,
         unique=True,
@@ -149,6 +158,14 @@ class RoyaltyPayment(models.Model):
     Tracks royalty payments from the blockchain.
     Indexed by Celery workers listening to Story Protocol events.
     """
+    uuid = models.UUIDField(
+        default=uuid.uuid4,
+        editable=False,
+        unique=True,
+        db_index=True,
+        help_text="Public UUID for API access"
+    )
+
     asset = models.ForeignKey(
         IPAsset,
         on_delete=models.CASCADE,

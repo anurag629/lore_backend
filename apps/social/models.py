@@ -1,3 +1,4 @@
+import uuid
 from django.db import models
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -9,6 +10,14 @@ class Interaction(models.Model):
     Tracks user interactions with IP assets.
     Includes likes, views, and spin-off registrations.
     """
+    uuid = models.UUIDField(
+        default=uuid.uuid4,
+        editable=False,
+        unique=True,
+        db_index=True,
+        help_text="Public UUID for API access"
+    )
+
     INTERACTION_TYPES = [
         ('like', 'Like'),
         ('view', 'View'),
@@ -53,6 +62,14 @@ class Comment(models.Model):
     User comments on IP assets.
     Supports nested replies (threaded comments).
     """
+    uuid = models.UUIDField(
+        default=uuid.uuid4,
+        editable=False,
+        unique=True,
+        db_index=True,
+        help_text="Public UUID for API access"
+    )
+
     asset = models.ForeignKey(
         IPAsset,
         on_delete=models.CASCADE,

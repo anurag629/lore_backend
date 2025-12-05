@@ -15,6 +15,8 @@ from .validators import (
 
 class CreatorSerializer(serializers.ModelSerializer):
     """Serializer for asset creator information."""
+    # User uses wallet_address as public ID, not UUID
+    id = serializers.IntegerField(read_only=True)  # Keep internal ID for user
 
     class Meta:
         model = LoreUser
@@ -25,6 +27,7 @@ class CreatorSerializer(serializers.ModelSerializer):
 class IPAssetListSerializer(serializers.ModelSerializer):
     """Serializer for listing IP assets (used in browse/explore pages)."""
 
+    id = serializers.UUIDField(source='uuid', read_only=True)
     creator = CreatorSerializer(read_only=True)
     derivative_count = serializers.SerializerMethodField()
 
@@ -58,6 +61,7 @@ class IPAssetListSerializer(serializers.ModelSerializer):
 class ParentAssetSerializer(serializers.ModelSerializer):
     """Serializer for parent asset information (used in derivatives)."""
 
+    id = serializers.UUIDField(source='uuid', read_only=True)
     creator = CreatorSerializer(read_only=True)
 
     class Meta:
@@ -69,6 +73,7 @@ class ParentAssetSerializer(serializers.ModelSerializer):
 class IPAssetDetailSerializer(serializers.ModelSerializer):
     """Detailed serializer for individual IP asset view."""
 
+    id = serializers.UUIDField(source='uuid', read_only=True)
     creator = CreatorSerializer(read_only=True)
     parent_asset = ParentAssetSerializer(read_only=True)
     derivative_count = serializers.IntegerField(read_only=True)
@@ -197,7 +202,7 @@ class IPAssetUpdateSerializer(serializers.ModelSerializer):
 class DerivativeCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating a derivative/remix of an existing IP asset."""
 
-    parent_asset_id = serializers.IntegerField(write_only=True)
+    parent_asset_id = serializers.UUIDField(write_only=True)
     media_file = serializers.FileField(
         write_only=True,
         required=False,
@@ -227,7 +232,7 @@ class DerivativeCreateSerializer(serializers.ModelSerializer):
     def validate_parent_asset_id(self, value):
         """Validate that parent asset exists and allows derivatives."""
         try:
-            parent = IPAsset.objects.get(id=value, is_deleted=False)
+            parent = IPAsset.objects.get(uuid=value, is_deleted=False)
         except IPAsset.DoesNotExist:
             raise serializers.ValidationError("Parent asset not found")
 
@@ -275,6 +280,7 @@ class DerivativeCreateSerializer(serializers.ModelSerializer):
 class RoyaltyPaymentSerializer(serializers.ModelSerializer):
     """Serializer for royalty payment records."""
 
+    id = serializers.UUIDField(source='uuid', read_only=True)
     asset = IPAssetListSerializer(read_only=True)
     recipient = CreatorSerializer(read_only=True)
 

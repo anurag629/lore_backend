@@ -22,9 +22,12 @@ class CommentUserSerializer(serializers.ModelSerializer):
 class CommentSerializer(serializers.ModelSerializer):
     """Serializer for comments."""
     
+    id = serializers.UUIDField(source='uuid', read_only=True)
     user = CommentUserSerializer(read_only=True)
     reply_count = serializers.IntegerField(read_only=True)
     is_own_comment = serializers.SerializerMethodField()
+    asset = serializers.UUIDField(source='asset.uuid', read_only=True)
+    parent = serializers.SerializerMethodField()
     
     class Meta:
         model = Comment
@@ -42,6 +45,12 @@ class CommentSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'user', 'created_at', 'updated_at', 'reply_count', 'is_own_comment']
     
+    def get_parent(self, obj):
+        """Get parent comment UUID."""
+        if obj.parent:
+            return str(obj.parent.uuid)
+        return None
+    
     def get_is_own_comment(self, obj):
         """Check if comment belongs to current user."""
         request = self.context.get('request')
@@ -53,9 +62,30 @@ class CommentSerializer(serializers.ModelSerializer):
 class CommentCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating comments."""
     
+    asset = serializers.UUIDField(write_only=True)
+    parent = serializers.UUIDField(required=False, allow_null=True, write_only=True)
+    
     class Meta:
         model = Comment
         fields = ['asset', 'parent', 'content']
+    
+    def validate_asset(self, value):
+        """Validate asset exists."""
+        try:
+            asset = IPAsset.objects.get(uuid=value, is_deleted=False)
+            return asset
+        except IPAsset.DoesNotExist:
+            raise serializers.ValidationError("Asset not found.")
+    
+    def validate_parent(self, value):
+        """Validate parent comment exists."""
+        if value is None:
+            return None
+        try:
+            parent = Comment.objects.get(uuid=value, is_deleted=False)
+            return parent
+        except Comment.DoesNotExist:
+            raise serializers.ValidationError("Parent comment not found.")
     
     def validate_content(self, value):
         """Validate comment content."""
@@ -83,6 +113,10 @@ class CommentCreateSerializer(serializers.ModelSerializer):
                 })
         
         return attrs
+    
+    def create(self, validated_data):
+        """Create comment with proper foreign key references."""
+        return Comment.objects.create(**validated_data)
 
 
 class CommentUpdateSerializer(serializers.ModelSerializer):
@@ -104,10 +138,11 @@ class CommentUpdateSerializer(serializers.ModelSerializer):
 class InteractionSerializer(serializers.ModelSerializer):
     """Serializer for interactions."""
     
+    id = serializers.UUIDField(source='uuid', read_only=True)
     user = CommentUserSerializer(read_only=True)
+    asset = serializers.UUIDField(source='asset.uuid', read_only=True)
     
     class Meta:
         model = Interaction
         fields = ['id', 'user', 'asset', 'type', 'created_at']
         read_only_fields = fields
-

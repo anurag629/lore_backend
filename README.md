@@ -200,6 +200,76 @@ python manage.py shell
 python manage.py test
 ```
 
+## User Management
+
+### Make an Existing User Staff/Superuser
+
+If you've already signed in with your wallet and need admin access, use the Django shell:
+
+```bash
+python manage.py shell
+```
+
+Then run:
+
+```python
+from apps.core.models import LoreUser
+
+# Find your user by wallet address (lowercase)
+user = LoreUser.objects.get(wallet_address='0xyour_wallet_address_here'.lower())
+
+# Make the user staff (can access Django admin)
+user.is_staff = True
+
+# Make the user superuser (full admin privileges)
+user.is_superuser = True
+
+# Set a password for Django admin login (optional but recommended)
+user.set_password('your_secure_password_here')
+
+# Save changes
+user.save()
+
+# Verify
+print(f"User: {user.wallet_address}")
+print(f"is_staff: {user.is_staff}")
+print(f"is_superuser: {user.is_superuser}")
+print(f"has_password: {user.has_usable_password()}")
+```
+
+> **Note:** After setting a password, you can log into Django admin (`/admin/`) using your wallet address as the username and the password you set.
+
+### List All Users
+
+```python
+from apps.core.models import LoreUser
+
+# List all users
+for user in LoreUser.objects.all():
+    print(f"{user.wallet_address} - staff: {user.is_staff}, super: {user.is_superuser}")
+```
+
+### Change/Reset Password
+
+```python
+from apps.core.models import LoreUser
+
+user = LoreUser.objects.get(wallet_address='0xyour_wallet_address_here'.lower())
+user.set_password('new_secure_password')
+user.save()
+```
+
+### Remove Admin Privileges
+
+```python
+user = LoreUser.objects.get(wallet_address='0xyour_wallet_address_here'.lower())
+user.is_staff = False
+user.is_superuser = False
+user.save()
+```
+
+After making yourself a superuser, you can access the Django admin at `http://localhost:8000/admin/`
+
 ## Tech Stack
 
 - **Backend Framework:** Django 5.1

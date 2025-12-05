@@ -8,6 +8,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAuthenticated
+from rest_framework.exceptions import NotFound
 from django.shortcuts import get_object_or_404
 from django.db import transaction
 from django.db.models import F, Count, Q, Prefetch
@@ -76,6 +77,11 @@ class IPAssetViewSet(viewsets.ModelViewSet):
         """
         Get queryset with optimizations.
         Filtering is handled by django-filter.
+        
+        Rules:
+        - Explore (list view without creator filter): Only show registered assets
+        - Dashboard (list view with creator filter for own assets): Show ALL statuses
+        - Detail view: Show asset regardless of status (for viewing failed assets)
         """
         queryset = super().get_queryset()
         
@@ -83,27 +89,60 @@ class IPAssetViewSet(viewsets.ModelViewSet):
         if not self.request.user.is_staff:
             queryset = queryset.filter(is_deleted=False)
         
-        # Optimize queryset based on action
+        # Check if user is viewing their own assets
+        # The creator filter can be either user ID or wallet address
+        creator_param = self.request.query_params.get('creator')
+        is_viewing_own_assets = False
+        
+        if creator_param and self.request.user.is_authenticated:
+            try:
+                # Try to parse as integer (user ID)
+                creator_id = int(creator_param)
+                is_viewing_own_assets = creator_id == self.request.user.id
+            except (ValueError, TypeError):
+                # Not a number, treat as wallet address
+                is_viewing_own_assets = (
+                    creator_param.lower() == self.request.user.wallet_address.lower()
+                )
+        
+        # For list view: filter by registration status
         if self.action == 'list':
-            # For list view, annotate derivative count to avoid N+1 queries
+            # If user is viewing their own assets, show ALL statuses
+            # Otherwise, only show registered assets (for explore page)
+            if not is_viewing_own_assets:
+                queryset = queryset.filter(registration_status='registered')
+            
+            # Annotate derivative count to avoid N+1 queries
             queryset = queryset.annotate(
                 derivative_count_annotated=Count(
                     'derivatives',
-                    filter=Q(derivatives__is_deleted=False)
+                    filter=Q(derivatives__is_deleted=False, derivatives__registration_status='registered')
                 )
             )
         elif self.action == 'retrieve':
-            # For detail view, prefetch derivatives with creator
-            queryset = queryset.prefetch_related(
-                Prefetch(
-                    'derivatives',
-                    queryset=IPAsset.objects.filter(is_deleted=False)
-                        .select_related('creator')
-                        .order_by('-created_at')[:10]
-                )
-            )
+            # For detail view, allow viewing any asset (registered or not)
+            # But filter by registration_status for non-owners viewing other users' assets
+            # This allows users to view their own failed assets, but prevents viewing others' failed assets
+            pass  # No filtering needed - we'll handle this in get_object()
         
         return queryset
+    
+    def get_object(self):
+        """
+        Override get_object to allow users to view their own assets regardless of status,
+        but only allow viewing registered assets from other users.
+        """
+        obj = super().get_object()
+        
+        # If user is authenticated and owns the asset, allow viewing regardless of status
+        if self.request.user.is_authenticated and obj.creator_id == self.request.user.id:
+            return obj
+        
+        # For other users' assets, only allow viewing if registered
+        if obj.registration_status != 'registered':
+            raise NotFound("Asset not found")
+        
+        return obj
 
     def list(self, request, *args, **kwargs):
         """
@@ -735,6 +774,16 @@ class IPAssetViewSet(viewsets.ModelViewSet):
         """Get current royalty balance for an IP asset."""
         asset = self.get_object()
 
+        # If asset is not registered on Story Protocol, return zero balance
+        if not asset.story_ip_id or asset.registration_status in ['failed', 'pending']:
+            return Response({
+                'balance': '0',
+                'asset_id': asset.id,
+                'story_ip_id': asset.story_ip_id,
+                'status': asset.registration_status,
+                'message': 'Asset not registered on Story Protocol' if asset.registration_status == 'failed' else 'Asset registration pending'
+            })
+
         try:
             story_service = get_story_service()
 
@@ -760,8 +809,10 @@ class IPAssetViewSet(viewsets.ModelViewSet):
             return Response(
                 {
                     'error': 'Failed to get royalty balance',
-                    'detail': str(e)
+                    'detail': str(e),
+                    'balance': '0',  # Return zero balance on error
+                    'asset_id': asset.id,
                 },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                status=status.HTTP_200_OK  # Return 200 with error message instead of 500
             )
 

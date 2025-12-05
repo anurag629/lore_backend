@@ -128,23 +128,25 @@ def get_user_by_address(request, wallet_address):
     if cached_response:
         return Response(cached_response, status=status.HTTP_200_OK)
     
-    try:
-        # Optimize query with prefetch for assets count
-        user = LoreUser.objects.prefetch_related(
-            'assets'
-        ).get(wallet_address__iexact=wallet_address)
-        serializer = LoreUserSerializer(user)
-        response_data = serializer.data
-        
-        # Cache the response
-        cache_user_profile(wallet_address, response_data)
-        
-        return Response(response_data, status=status.HTTP_200_OK)
-    except LoreUser.DoesNotExist:
+    # Use filter().first() instead of get() to handle potential duplicates
+    # (can occur due to case sensitivity issues with wallet addresses)
+    user = LoreUser.objects.prefetch_related(
+        'assets'
+    ).filter(wallet_address__iexact=wallet_address).first()
+    
+    if not user:
         return Response(
             {'error': 'User not found'},
             status=status.HTTP_404_NOT_FOUND
         )
+    
+    serializer = LoreUserSerializer(user)
+    response_data = serializer.data
+    
+    # Cache the response
+    cache_user_profile(wallet_address, response_data)
+    
+    return Response(response_data, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])

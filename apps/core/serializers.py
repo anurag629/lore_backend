@@ -143,17 +143,26 @@ class SIWELoginSerializer(serializers.Serializer):
 
         wallet_address = verification_result['wallet_address']
 
-        # Normalize wallet address
+        # Normalize wallet address to lowercase for consistent storage
         wallet_address = normalize_wallet_address(wallet_address)
 
-        # Get or create user
-        user, created = LoreUser.objects.get_or_create(
-            wallet_address=wallet_address,
-            defaults={
-                'username': f"user_{wallet_address[:8]}",
-                'email': f"{wallet_address}@lore.local",  # Dummy email
-            }
-        )
+        # First try to find existing user with case-insensitive lookup
+        # to handle any legacy data with different case
+        user = LoreUser.objects.filter(wallet_address__iexact=wallet_address).first()
+        
+        if user:
+            created = False
+            # Update wallet address to normalized form if different
+            if user.wallet_address != wallet_address:
+                user.wallet_address = wallet_address
+                user.save(update_fields=['wallet_address'])
+        else:
+            # Create new user
+            user = LoreUser.objects.create(
+                wallet_address=wallet_address,
+                username=f"user_{wallet_address[:8]}",
+            )
+            created = True
 
         attrs['user'] = user
         attrs['created'] = created

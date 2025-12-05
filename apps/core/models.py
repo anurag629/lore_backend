@@ -13,6 +13,9 @@ class LoreUserManager(BaseUserManager):
         if not wallet_address:
             raise ValueError('The wallet_address must be set')
         
+        # Normalize wallet address to lowercase to prevent duplicates
+        wallet_address = wallet_address.lower()
+        
         # Handle email: normalize if provided, set to None if empty/None
         if email and email.strip():
             email = self.normalize_email(email)
@@ -111,6 +114,12 @@ class LoreUser(AbstractUser):
             models.Index(fields=['wallet_address']),
             models.Index(fields=['-created_at']),
         ]
+
+    def save(self, *args, **kwargs):
+        """Normalize wallet address to lowercase before saving."""
+        if self.wallet_address:
+            self.wallet_address = self.wallet_address.lower()
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.username or self.wallet_address[:10]

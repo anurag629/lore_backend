@@ -12,16 +12,29 @@ class IPAssetFilter(django_filters.FilterSet):
     title = django_filters.CharFilter(lookup_expr='icontains')
     description = django_filters.CharFilter(lookup_expr='icontains')
     
-    # Creator filter
-    creator = django_filters.CharFilter(
-        field_name='creator__wallet_address',
-        lookup_expr='iexact'
-    )
+    # Creator filter - supports both user ID and wallet address
+    creator = django_filters.CharFilter(method='filter_creator')
+    
+    def filter_creator(self, queryset, name, value):
+        """
+        Filter by creator - supports both user ID and wallet address.
+        If value is numeric, treat as user ID. Otherwise, treat as wallet address.
+        """
+        try:
+            # Try to parse as integer (user ID)
+            creator_id = int(value)
+            return queryset.filter(creator__id=creator_id)
+        except (ValueError, TypeError):
+            # Not a number, treat as wallet address
+            return queryset.filter(creator__wallet_address__iexact=value)
     
     # Boolean filters
     is_derivative = django_filters.BooleanFilter()
     allow_derivatives = django_filters.BooleanFilter()
     commercial_rights = django_filters.BooleanFilter()
+    
+    # Registration status filter
+    registration_status = django_filters.CharFilter(lookup_expr='iexact')
     
     # Royalty percentage range
     royalty_percentage_min = django_filters.NumberFilter(

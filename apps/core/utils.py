@@ -20,6 +20,24 @@ def generate_nonce() -> str:
     return secrets.token_hex(16)
 
 
+def to_checksum_address(address: str) -> str:
+    """
+    Convert address to EIP-55 checksummed format.
+    Required for SIWE messages.
+    
+    Args:
+        address: Ethereum wallet address (any case)
+        
+    Returns:
+        str: Checksummed address (mixed case like 0x8BC3DD5d...)
+    """
+    try:
+        w3 = Web3()
+        return w3.to_checksum_address(address)
+    except Exception:
+        return address
+
+
 def create_siwe_message(
     domain: str,
     wallet_address: str,
@@ -40,10 +58,13 @@ def create_siwe_message(
     Returns:
         str: SIWE message string to be signed
     """
+    # SIWE requires EIP-55 checksummed address format
+    checksummed_address = to_checksum_address(wallet_address)
+    
     # Create SIWE message
     message = SiweMessage(
         domain=domain,
-        address=wallet_address,
+        address=checksummed_address,
         statement="Sign in to Lore",
         uri=uri,
         version="1",
@@ -144,17 +165,19 @@ def verify_eth_signature_legacy(
 
 def normalize_wallet_address(address: str) -> str:
     """
-    Normalize wallet address to checksummed format
+    Normalize wallet address to lowercase for consistent storage and lookup.
+    
+    Note: We store addresses in lowercase to avoid case-sensitivity issues
+    with database unique constraints and lookups.
 
     Args:
         address: Ethereum wallet address
 
     Returns:
-        str: Checksummed address
+        str: Lowercase address
     """
-    try:
-        w3 = Web3()
-        return w3.to_checksum_address(address)
-    except Exception:
-        # If conversion fails, return lowercase
-        return address.lower()
+    if not address:
+        return address
+    
+    # Always return lowercase for consistency
+    return address.lower()

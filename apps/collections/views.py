@@ -6,6 +6,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAuthenticated
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db.models import Count, Q
 from django.db import transaction
 
@@ -29,6 +30,7 @@ class CollectionViewSet(viewsets.ModelViewSet):
     """
     queryset = Collection.objects.select_related('creator').prefetch_related('assets').all()
     permission_classes = [IsAuthenticatedOrReadOnly]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     # Use UUID for lookups instead of integer pk
     lookup_field = 'uuid'
 

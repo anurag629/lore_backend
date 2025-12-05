@@ -98,6 +98,12 @@ class CollectionCreateSerializer(serializers.ModelSerializer):
         allow_empty=True,
         help_text="List of asset UUIDs to add to collection"
     )
+    cover_image = serializers.ImageField(
+        required=False,
+        allow_null=True,
+        write_only=True,
+        help_text="Cover image file to upload to IPFS"
+    )
 
     class Meta:
         model = Collection
@@ -105,6 +111,7 @@ class CollectionCreateSerializer(serializers.ModelSerializer):
             'title',
             'description',
             'cover_image_url',
+            'cover_image',
             'is_public',
             'asset_ids',
         ]
@@ -112,6 +119,14 @@ class CollectionCreateSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         """Create collection and add assets."""
         asset_ids = validated_data.pop('asset_ids', [])
+        cover_image = validated_data.pop('cover_image', None)
+        
+        # Handle cover image upload to IPFS
+        if cover_image:
+            from apps.assets.services.pinata_service import get_pinata_service
+            pinata = get_pinata_service()
+            result = pinata.upload_file(cover_image, f"collection-cover-{cover_image.name}")
+            validated_data['cover_image_url'] = result['url']
         
         # creator is passed via serializer.save(creator=user) in the view
         collection = Collection.objects.create(**validated_data)
@@ -137,6 +152,12 @@ class CollectionUpdateSerializer(serializers.ModelSerializer):
         allow_empty=True,
         help_text="List of asset UUIDs to replace collection assets"
     )
+    cover_image = serializers.ImageField(
+        required=False,
+        allow_null=True,
+        write_only=True,
+        help_text="Cover image file to upload to IPFS"
+    )
 
     class Meta:
         model = Collection
@@ -144,6 +165,7 @@ class CollectionUpdateSerializer(serializers.ModelSerializer):
             'title',
             'description',
             'cover_image_url',
+            'cover_image',
             'is_public',
             'asset_ids',
         ]
@@ -151,6 +173,14 @@ class CollectionUpdateSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         """Update collection and optionally update assets."""
         asset_ids = validated_data.pop('asset_ids', None)
+        cover_image = validated_data.pop('cover_image', None)
+        
+        # Handle cover image upload to IPFS
+        if cover_image:
+            from apps.assets.services.pinata_service import get_pinata_service
+            pinata = get_pinata_service()
+            result = pinata.upload_file(cover_image, f"collection-cover-{cover_image.name}")
+            validated_data['cover_image_url'] = result['url']
         
         # Update collection fields
         for attr, value in validated_data.items():

@@ -223,6 +223,7 @@ STORY_PROTOCOL_CHAIN_ID = env.int('STORY_PROTOCOL_CHAIN_ID', default=1315)
 # Story Protocol Configuration
 STORY_PROTOCOL_PRIVATE_KEY = env('STORY_PROTOCOL_PRIVATE_KEY', default='')
 STORY_PROTOCOL_NETWORK = env('STORY_PROTOCOL_NETWORK', default='aeneid')  # aeneid (testnet) or mainnet
+STORY_PROTOCOL_SPG_NFT_CONTRACT = env('STORY_PROTOCOL_SPG_NFT_CONTRACT', default='0xfE265a91dBe911db06999019228a678b86C04959')  # Default SPG NFT contract for Aeneid testnet
 
 # IPFS / Pinata Configuration
 PINATA_API_KEY = env('PINATA_API_KEY', default='')

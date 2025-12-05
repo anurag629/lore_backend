@@ -231,68 +231,97 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR
                     )
 
-            # Step 2: Start database transaction
-            # All DB operations from here will rollback on failure
-            with transaction.atomic():
-                # Step 3: Save asset temporarily to get ID for metadata
-                asset = serializer.save(
-                    creator=request.user,
-                    story_ip_id='',  # Will be updated after registration
+            # Step 2: Save asset to Django database FIRST (so it persists even if Story Protocol fails)
+            # This ensures we have a record of all assets, even if blockchain registration fails
+            from django.utils import timezone
+            asset = serializer.save(
+                creator=request.user,
+                story_ip_id='',  # Will be updated after registration
+                media_url=media_url,
+                metadata_hash='',  # Will be updated after metadata upload
+                registration_status='pending',  # Initial status
+                registration_attempts=0
+            )
+            logger.info(f"Asset saved to database with ID: {asset.id}, status: pending")
+
+            # Step 3: Upload metadata to IPFS
+            try:
+                logger.info("Uploading metadata to IPFS")
+                # Normalize wallet address before passing to metadata
+                from apps.core.utils import normalize_wallet_address
+                normalized_address = normalize_wallet_address(request.user.wallet_address)
+                
+                metadata_result = pinata_service.upload_ip_metadata(
+                    title=serializer.validated_data['title'],
+                    description=serializer.validated_data['description'],
                     media_url=media_url,
-                    metadata_hash=''  # Will be updated after metadata upload
+                    creator_address=normalized_address,
+                    asset_id=asset.id,
+                    license_terms={
+                        'allow_derivatives': serializer.validated_data.get('allow_derivatives', True),
+                        'commercial_rights': serializer.validated_data.get('commercial_rights', False),
+                        'royalty_percentage': serializer.validated_data.get('royalty_percentage', 0),
+                    }
                 )
 
-                # Step 4: Upload metadata to IPFS
-                try:
-                    logger.info("Uploading metadata to IPFS")
-                    # Normalize wallet address before passing to metadata
-                    from apps.core.utils import normalize_wallet_address
-                    normalized_address = normalize_wallet_address(request.user.wallet_address)
-                    
-                    metadata_result = pinata_service.upload_ip_metadata(
-                        title=serializer.validated_data['title'],
-                        description=serializer.validated_data['description'],
-                        media_url=media_url,
-                        creator_address=normalized_address,
-                        asset_id=asset.id,
-                        license_terms={
-                            'allow_derivatives': serializer.validated_data.get('allow_derivatives', True),
-                            'commercial_rights': serializer.validated_data.get('commercial_rights', False),
-                            'royalty_percentage': serializer.validated_data.get('royalty_percentage', 0),
-                        }
-                    )
+                metadata_uri = metadata_result['url']  # ipfs:// URI
+                metadata_hash = metadata_result['hash']  # Hex string without 0x prefix
+                logger.info(f"Metadata uploaded to IPFS: {metadata_result['ipfs_hash']}")
+                logger.info(f"Metadata hash: {metadata_result.get('hash_with_prefix', metadata_hash)}")
 
-                    metadata_uri = metadata_result['url']  # ipfs:// URI
-                    metadata_hash = metadata_result['hash']  # Hex string without 0x prefix
-                    logger.info(f"Metadata uploaded to IPFS: {metadata_result['ipfs_hash']}")
-                    logger.info(f"Metadata hash: {metadata_result.get('hash_with_prefix', metadata_hash)}")
+                # Update asset with metadata hash
+                asset.metadata_hash = metadata_hash
+                asset.save()
 
-                except Exception as e:
-                    logger.error(f"Failed to upload metadata to IPFS: {str(e)}")
-                    # Transaction will rollback, asset deleted
-                    raise
+            except Exception as e:
+                logger.error(f"Failed to upload metadata to IPFS: {str(e)}")
+                # Update asset status to failed
+                asset.registration_status = 'failed'
+                asset.registration_error = f"Failed to upload metadata to IPFS: {str(e)}"
+                asset.registration_attempts = 1
+                asset.last_registration_attempt = timezone.now()
+                asset.save()
+                raise
 
-                # Step 5: Register IP asset on Story Protocol
-                # Ensure wallet address is normalized
-                normalized_creator_address = normalize_wallet_address(request.user.wallet_address)
-                logger.info(f"Registering IP asset on Story Protocol for user: {normalized_creator_address}")
-                logger.info(f"Metadata hash format: {metadata_hash[:20]}... (length: {len(metadata_hash)})")
-                try:
-                    registration_result = async_to_sync(story_service.register_ip_asset)(
-                        metadata_uri=metadata_uri,
-                        metadata_hash=metadata_hash,
-                        creator_address=normalized_creator_address
-                    )
+            # Step 4: Register IP asset on Story Protocol (OUTSIDE transaction so asset persists on failure)
+            # Ensure wallet address is normalized and checksummed (required by Web3.py)
+            from web3 import Web3
+            normalized_creator_address = normalize_wallet_address(request.user.wallet_address)
+            # Double-check checksumming (normalize_wallet_address may fail silently)
+            try:
+                normalized_creator_address = Web3.to_checksum_address(normalized_creator_address)
+            except Exception as e:
+                logger.error(f"Failed to checksum address {normalized_creator_address}: {e}")
+                asset.registration_status = 'failed'
+                asset.registration_error = f"Invalid wallet address format: {normalized_creator_address}"
+                asset.registration_attempts = 1
+                asset.last_registration_attempt = timezone.now()
+                asset.save()
+                raise ValueError(f"Invalid wallet address format: {normalized_creator_address}")
+            
+            logger.info(f"Registering IP asset on Story Protocol for user: {normalized_creator_address}")
+            logger.info(f"Metadata hash format: {metadata_hash[:20]}... (length: {len(metadata_hash)})")
+            
+            # Update asset status to retrying
+            asset.registration_status = 'retrying'
+            asset.registration_attempts += 1
+            asset.last_registration_attempt = timezone.now()
+            asset.save()
+            
+            try:
+                registration_result = async_to_sync(story_service.register_ip_asset)(
+                    metadata_uri=metadata_uri,
+                    metadata_hash=metadata_hash,
+                    creator_address=normalized_creator_address,
+                    allow_derivatives=serializer.validated_data.get('allow_derivatives', True),
+                    commercial_use=serializer.validated_data.get('commercial_rights', False),
+                    royalty_percentage=serializer.validated_data.get('royalty_percentage', 0)
+                )
 
-                    story_ip_id = registration_result['ip_id']
-                    logger.info(f"IP Asset registered with ID: {story_ip_id}")
+                story_ip_id = registration_result['ip_id']
+                logger.info(f"IP Asset registered with ID: {story_ip_id}")
 
-                except Exception as e:
-                    logger.error(f"Failed to register IP on Story Protocol: {str(e)}")
-                    # Transaction will rollback
-                    raise
-
-                # Step 6: Attach license terms
+                # Step 5: Attach license terms
                 try:
                     async_to_sync(story_service.attach_license_terms)(
                         ip_id=story_ip_id,
@@ -303,22 +332,31 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                     logger.info(f"License terms attached to IP: {story_ip_id}")
 
                 except Exception as e:
-                    logger.error(f"Failed to attach license terms: {str(e)}")
+                    logger.warning(f"Failed to attach license terms: {str(e)}")
                     # Note: Asset is registered but license not attached
                     # We continue as this is not critical - asset can still function
-                    # Consider: Should we rollback or continue?
-                    # For now, log and continue
 
-                # Step 7: Update asset with Story Protocol ID and metadata hash
+                # Step 6: Update asset with Story Protocol ID and success status
                 asset.story_ip_id = story_ip_id
-                asset.metadata_hash = metadata_hash
+                asset.registration_status = 'registered'
+                asset.registration_error = ''  # Clear any previous errors
                 asset.save()
+                logger.info(f"Asset {asset.id} successfully registered on Story Protocol with IP ID: {story_ip_id}")
+
+            except Exception as e:
+                error_message = str(e)
+                logger.error(f"Failed to register IP on Story Protocol: {error_message}")
+                # Update asset status to failed (but keep asset in database)
+                asset.registration_status = 'failed'
+                asset.registration_error = error_message
+                asset.save()
+                logger.warning(f"Asset {asset.id} saved to database but Story Protocol registration failed. Error: {error_message}")
+                # Don't raise - return the asset with failed status so user can retry
 
             # Invalidate cache
             invalidate_asset_cache()
 
-            # Transaction completed successfully
-            # Return created asset
+            # Return created asset (even if Story Protocol registration failed)
             response_serializer = IPAssetDetailSerializer(asset)
             return Response(
                 response_serializer.data,
@@ -331,6 +369,138 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                 {
                     'error': 'Failed to create IP asset',
                     'detail': str(e)
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def retry_registration(self, request, pk=None):
+        """
+        Retry Story Protocol registration for a failed asset.
+        Only works for assets with registration_status='failed'.
+        """
+        asset = self.get_object()
+        
+        # Check if user owns the asset
+        if asset.creator != request.user:
+            return Response(
+                {'error': 'Permission denied'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Check if asset is in failed state
+        if asset.registration_status not in ['failed', 'pending']:
+            return Response(
+                {
+                    'error': 'Asset registration cannot be retried',
+                    'detail': f'Current status: {asset.registration_status}. Only failed or pending assets can be retried.'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if metadata hash exists
+        if not asset.metadata_hash:
+            return Response(
+                {
+                    'error': 'Cannot retry registration',
+                    'detail': 'Asset metadata hash is missing. Please recreate the asset.'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        story_service = get_story_service()
+        if not story_service.is_ready():
+            return Response(
+                {
+                    'error': 'Story Protocol service not available',
+                    'detail': 'Please configure STORY_PROTOCOL_PRIVATE_KEY in settings'
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+        
+        # Get metadata URI from Pinata (reconstruct from hash)
+        pinata_service = get_pinata_service()
+        metadata_uri = f"ipfs://{asset.metadata_hash}"
+        
+        # Normalize and checksum wallet address
+        from web3 import Web3
+        from apps.core.utils import normalize_wallet_address
+        normalized_creator_address = normalize_wallet_address(request.user.wallet_address)
+        try:
+            normalized_creator_address = Web3.to_checksum_address(normalized_creator_address)
+        except Exception as e:
+            return Response(
+                {
+                    'error': 'Invalid wallet address',
+                    'detail': f'Failed to checksum address: {e}'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Update asset status to retrying
+        from django.utils import timezone
+        asset.registration_status = 'retrying'
+        asset.registration_attempts += 1
+        asset.last_registration_attempt = timezone.now()
+        asset.save()
+        
+        try:
+            # Attempt registration
+            registration_result = async_to_sync(story_service.register_ip_asset)(
+                metadata_uri=metadata_uri,
+                metadata_hash=asset.metadata_hash,
+                creator_address=normalized_creator_address,
+                allow_derivatives=asset.allow_derivatives,
+                commercial_use=asset.commercial_rights,
+                royalty_percentage=asset.royalty_percentage
+            )
+            
+            story_ip_id = registration_result['ip_id']
+            logger.info(f"Asset {asset.id} successfully registered on retry with IP ID: {story_ip_id}")
+            
+            # Try to attach license terms
+            try:
+                async_to_sync(story_service.attach_license_terms)(
+                    ip_id=story_ip_id,
+                    allow_derivatives=asset.allow_derivatives,
+                    commercial_use=asset.commercial_rights,
+                    royalty_percentage=asset.royalty_percentage
+                )
+                logger.info(f"License terms attached to IP: {story_ip_id}")
+            except Exception as e:
+                logger.warning(f"Failed to attach license terms: {str(e)}")
+            
+            # Update asset with success
+            asset.story_ip_id = story_ip_id
+            asset.registration_status = 'registered'
+            asset.registration_error = ''
+            asset.save()
+            
+            # Invalidate cache
+            invalidate_asset_cache()
+            
+            response_serializer = IPAssetDetailSerializer(asset)
+            return Response(
+                {
+                    'message': 'Asset successfully registered on Story Protocol',
+                    'asset': response_serializer.data
+                },
+                status=status.HTTP_200_OK
+            )
+            
+        except Exception as e:
+            error_message = str(e)
+            logger.error(f"Retry registration failed for asset {asset.id}: {error_message}")
+            
+            # Update asset status to failed
+            asset.registration_status = 'failed'
+            asset.registration_error = error_message
+            asset.save()
+            
+            return Response(
+                {
+                    'error': 'Registration retry failed',
+                    'detail': error_message
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
@@ -419,11 +589,21 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                     raise
 
                 # Step 5: Register derivative IP on Story Protocol
+                # Ensure wallet address is normalized and checksummed (required by Web3.py)
+                from web3 import Web3
+                normalized_creator_address = normalize_wallet_address(request.user.wallet_address)
+                # Double-check checksumming (normalize_wallet_address may fail silently)
+                try:
+                    checksummed_address = Web3.to_checksum_address(normalized_creator_address)
+                except Exception as e:
+                    logger.error(f"Failed to checksum address {normalized_creator_address}: {e}")
+                    raise ValueError(f"Invalid wallet address format: {normalized_creator_address}")
+                
                 try:
                     registration_result = async_to_sync(story_service.register_ip_asset)(
                         metadata_uri=metadata_uri,
                         metadata_hash=metadata_hash,
-                        creator_address=request.user.wallet_address
+                        creator_address=checksummed_address
                     )
 
                     child_ip_id = registration_result['ip_id']

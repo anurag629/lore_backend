@@ -82,6 +82,34 @@ class IPAsset(models.Model):
         help_text="Timestamp when asset was deleted"
     )
 
+    # Story Protocol registration tracking
+    registration_status = models.CharField(
+        max_length=20,
+        choices=[
+            ('pending', 'Pending Registration'),
+            ('registered', 'Registered'),
+            ('failed', 'Registration Failed'),
+            ('retrying', 'Retrying Registration'),
+        ],
+        default='pending',
+        db_index=True,
+        help_text="Status of Story Protocol registration"
+    )
+    registration_error = models.TextField(
+        blank=True,
+        null=True,
+        help_text="Error message if registration failed"
+    )
+    registration_attempts = models.IntegerField(
+        default=0,
+        help_text="Number of registration attempts"
+    )
+    last_registration_attempt = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp of last registration attempt"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -97,6 +125,7 @@ class IPAsset(models.Model):
             models.Index(fields=['commercial_rights', '-created_at']),
             models.Index(fields=['created_at']),
             models.Index(fields=['story_ip_id']),
+            models.Index(fields=['registration_status', '-created_at']),
         ]
 
     def __str__(self):

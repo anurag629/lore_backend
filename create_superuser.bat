@@ -8,7 +8,7 @@ echo ===================================
 echo.
 
 REM Check if virtual environment exists
-if not exist "venv\Scripts\activate.bat" (
+if not exist ".venv\Scripts\activate.bat" (
     echo Error: Virtual environment not found!
     echo Please create one with: python -m venv venv
     exit /b 1

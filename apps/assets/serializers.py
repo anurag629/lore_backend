@@ -41,6 +41,7 @@ class IPAssetListSerializer(serializers.ModelSerializer):
             'derivative_count',
             'allow_derivatives',
             'commercial_rights',
+            'registration_status',
             'created_at',
         ]
         read_only_fields = fields
@@ -90,6 +91,10 @@ class IPAssetDetailSerializer(serializers.ModelSerializer):
             'commercial_rights',
             'derivative_count',
             'derivatives',
+            'registration_status',
+            'registration_error',
+            'registration_attempts',
+            'last_registration_attempt',
             'created_at',
             'updated_at',
         ]

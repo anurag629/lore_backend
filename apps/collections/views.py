@@ -50,14 +50,20 @@ class CollectionViewSet(viewsets.ModelViewSet):
         if creator_id:
             queryset = queryset.filter(creator_id=creator_id)
         
-        # Filter by public/private based on user
-        if not self.request.user.is_authenticated:
-            queryset = queryset.filter(is_public=True)
-        elif not self.request.user.is_staff:
-            # Show public collections or user's own collections
-            queryset = queryset.filter(
-                Q(is_public=True) | Q(creator=self.request.user)
-            )
+        # Explicit is_public filter (for discover tab)
+        is_public_param = self.request.query_params.get('is_public')
+        if is_public_param is not None:
+            is_public = is_public_param.lower() in ('true', '1', 'yes')
+            queryset = queryset.filter(is_public=is_public)
+        else:
+            # Default: Filter by public/private based on user authentication
+            if not self.request.user.is_authenticated:
+                queryset = queryset.filter(is_public=True)
+            elif not self.request.user.is_staff:
+                # Show public collections or user's own collections
+                queryset = queryset.filter(
+                    Q(is_public=True) | Q(creator=self.request.user)
+                )
         
         # Annotate asset count (named differently to avoid conflict with model property)
         queryset = queryset.annotate(

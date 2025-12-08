@@ -503,12 +503,14 @@ class IPAssetViewSet(viewsets.ModelViewSet):
             )
             
             story_ip_id = registration_result['ip_id']
+            license_terms_id = registration_result.get('license_terms_id')
             
             # Store results
             asset.story_ip_id = story_ip_id
             asset.step_data.setdefault('story_registration', {})['ip_id'] = story_ip_id
             asset.step_data.setdefault('story_registration', {})['transaction_hash'] = registration_result.get('transaction_hash', '')
             asset.step_data.setdefault('story_registration', {})['block_number'] = registration_result.get('block_number', 0)
+            asset.step_data.setdefault('story_registration', {})['license_terms_id'] = license_terms_id
             asset.creation_step = 'license_attachment'
             asset.save(update_fields=['story_ip_id', 'step_data', 'creation_step'])
             
@@ -542,11 +544,14 @@ class IPAssetViewSet(viewsets.ModelViewSet):
             return False
         
         try:
+            # Prefer existing license terms ID if registration returned one
+            license_terms_id = asset.step_data.get('story_registration', {}).get('license_terms_id')
             story_service.attach_license_terms(
                 ip_id=story_ip_id,
                 allow_derivatives=allow_derivatives,
                 commercial_use=commercial_use,
-                royalty_percentage=royalty_percentage
+                royalty_percentage=royalty_percentage,
+                license_terms_id=license_terms_id
             )
             
             # Store result
@@ -677,8 +682,12 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                 asset.save(update_fields=['registration_status', 'registration_error', 'failed_at_step'])
                 # Don't raise - return asset so user can retry
 
-            # Step 5: Attach license terms (non-critical, idempotent)
-            if story_ip_id:
+            # Step 5: License terms are already attached by mint_and_register_ip_asset_with_pil_terms
+            # Only attach separately if license_terms_id was NOT returned (shouldn't happen)
+            license_terms_id = asset.step_data.get('story_registration', {}).get('license_terms_id')
+            if story_ip_id and not license_terms_id:
+                # License terms were not attached during registration, try to attach now
+                logger.warning(f"License terms ID not found in registration result for asset {asset.id}, attempting separate attachment")
                 self._step_attach_license(
                     asset=asset,
                     story_ip_id=story_ip_id,
@@ -687,6 +696,16 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                     royalty_percentage=serializer.validated_data.get('royalty_percentage', 0),
                     story_service=story_service
                 )
+            elif license_terms_id:
+                # License terms already attached during registration, mark as completed
+                logger.info(f"License terms already attached during registration (ID: {license_terms_id}), skipping separate attachment")
+                asset.step_data.setdefault('license_attachment', {})['attached'] = True
+                asset.step_data.setdefault('license_attachment', {})['license_terms_id'] = license_terms_id
+                asset.creation_step = 'completed'
+                asset.registration_status = 'registered'
+                asset.registration_error = ''
+                asset.failed_at_step = None
+                asset.save(update_fields=['step_data', 'creation_step', 'registration_status', 'registration_error', 'failed_at_step'])
 
             # Invalidate cache
             invalidate_asset_cache()
@@ -1002,8 +1021,12 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                 else:
                     story_ip_id = asset.story_ip_id
             
-            # Step 5: Attach license terms (non-critical)
-            if story_ip_id:
+            # Step 5: License terms are already attached by mint_and_register_ip_asset_with_pil_terms
+            # Only attach separately if license_terms_id was NOT returned (shouldn't happen)
+            license_terms_id = asset.step_data.get('story_registration', {}).get('license_terms_id')
+            if story_ip_id and not license_terms_id:
+                # License terms were not attached during registration, try to attach now
+                logger.warning(f"License terms ID not found in registration result for asset {asset.id}, attempting separate attachment")
                 self._step_attach_license(
                     asset=asset,
                     story_ip_id=story_ip_id,
@@ -1012,6 +1035,16 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                     royalty_percentage=asset.royalty_percentage,
                     story_service=story_service
                 )
+            elif license_terms_id:
+                # License terms already attached during registration, mark as completed
+                logger.info(f"License terms already attached during registration (ID: {license_terms_id}), skipping separate attachment")
+                asset.step_data.setdefault('license_attachment', {})['attached'] = True
+                asset.step_data.setdefault('license_attachment', {})['license_terms_id'] = license_terms_id
+                asset.creation_step = 'completed'
+                asset.registration_status = 'registered'
+                asset.registration_error = ''
+                asset.failed_at_step = None
+                asset.save(update_fields=['step_data', 'creation_step', 'registration_status', 'registration_error', 'failed_at_step'])
             
             # Invalidate cache
             invalidate_asset_cache()
@@ -1145,7 +1178,17 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                 )
 
                 child_ip_id = registration_result['ip_id']
-                logger.info(f"Derivative IP registered with ID: {child_ip_id}")
+                child_license_terms_id = registration_result.get('license_terms_id')
+
+                if not child_license_terms_id:
+                    raise RuntimeError(
+                        "Story Protocol registration did not return license_terms_id; "
+                        "cannot proceed with derivative registration."
+                    )
+
+                logger.info(
+                    f"Derivative IP registered with ID: {child_ip_id}, LicenseTermsId: {child_license_terms_id}"
+                )
 
             except Exception as e:
                 logger.error(f"Failed to register derivative IP: {str(e)}")
@@ -1162,9 +1205,9 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                 story_service.register_derivative(
                     child_ip_id=child_ip_id,
                     parent_ip_ids=[parent_asset.story_ip_id],
-                    license_terms=None
+                    license_terms_id=child_license_terms_id
                 )
-                logger.info(f"Derivative relationship registered")
+                logger.info("Derivative relationship registered")
             except Exception as e:
                 logger.error(f"Failed to register derivative relationship: {str(e)}")
                 # Continue - asset is already registered, relationship can be added later
@@ -1177,6 +1220,10 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                     media_url=media_url,
                     metadata_hash=metadata_hash
                 )
+                # Persist license_terms_id for downstream processes/attachments
+                derivative.step_data = derivative.step_data or {}
+                derivative.step_data.setdefault('story_registration', {})['license_terms_id'] = child_license_terms_id
+                derivative.save(update_fields=['step_data'])
 
             # Invalidate cache
             invalidate_asset_cache()

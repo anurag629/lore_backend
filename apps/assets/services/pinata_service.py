@@ -2,7 +2,7 @@
 Pinata IPFS service for uploading files and metadata
 """
 import requests
-import hashlib
+from web3 import Web3
 import json
 from typing import Dict, Any, Optional, BinaryIO
 from django.conf import settings
@@ -184,12 +184,11 @@ class PinataService:
             name=f"asset-{asset_id}-metadata.json"
         )
 
-        # Calculate metadata hash (for Story Protocol)
-        # Story Protocol expects a hex string without '0x' prefix, or bytes
+        # Calculate metadata hash (Story Protocol expects keccak256)
         metadata_json = json.dumps(metadata, sort_keys=True)
-        hash_digest = hashlib.sha256(metadata_json.encode()).hexdigest()
-        # Return both formats: with 0x prefix (for display) and without (for Story Protocol)
-        metadata_hash = hash_digest  # Story Protocol SDK handles hex conversion internally
+        # keccak256 over the JSON bytes, return hex without 0x
+        hash_digest = Web3.keccak(text=metadata_json).hex()[2:]
+        metadata_hash = hash_digest
 
         return {
             **result,

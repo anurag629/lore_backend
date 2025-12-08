@@ -98,6 +98,15 @@ class StoryProtocolService:
             and self.account is not None
         )
 
+    def _build_ip_metadata(self, metadata_uri: str, metadata_hash: str) -> Dict[str, str]:
+        """
+        Build IP metadata payload using camelCase keys (per SDK docs).
+        """
+        return {
+            'ipMetadataURI': metadata_uri,
+            'ipMetadataHash': metadata_hash,
+        }
+
     def register_ip_asset(
         self,
         metadata_uri: str,
@@ -143,8 +152,7 @@ class StoryProtocolService:
             hash_preview = metadata_hash[:20] + '...' if len(metadata_hash) > 20 else metadata_hash
             logger.info(f"Metadata hash: {hash_preview} (length: {len(metadata_hash)})")
 
-            # Ensure metadata_hash is in correct format
-            # Story Protocol SDK expects hex string - keep 0x prefix for hash
+            # Ensure metadata_hash is in correct format (0x-prefixed keccak hex)
             if not metadata_hash.startswith('0x'):
                 metadata_hash = '0x' + metadata_hash
             
@@ -169,10 +177,7 @@ class StoryProtocolService:
             
             # Prepare IP metadata dict according to SDK documentation
             # ip_metadata_hash should be a hex string (with 0x prefix)
-            ip_metadata = {
-                'ip_metadata_uri': metadata_uri,
-                'ip_metadata_hash': metadata_hash,
-            }
+            ip_metadata = self._build_ip_metadata(metadata_uri, metadata_hash)
             hash_preview = metadata_hash[:20] + '...' if metadata_hash and len(metadata_hash) > 20 else metadata_hash
             logger.info(f"IP metadata prepared: uri={metadata_uri}, hash={hash_preview}")
             
@@ -271,6 +276,19 @@ class StoryProtocolService:
                 except Exception as code_error:
                     logger.warning(f"Could not verify SPG NFT contract code: {code_error}")
                     # Continue anyway, but log warning
+
+                # Validate royalty policy and currency contracts when provided
+                for contract_label, contract_addr in [('Royalty Policy', royalty_policy), ('Currency', currency)]:
+                    if not contract_addr:
+                        continue
+                    try:
+                        code = self.web3.eth.get_code(contract_addr)
+                        if code == b'':
+                            logger.warning(f"{contract_label} {contract_addr} has no code on chain {settings.STORY_PROTOCOL_CHAIN_ID}.")
+                        else:
+                            logger.info(f"[OK] {contract_label} {contract_addr} verified (code length: {len(code)} bytes)")
+                    except Exception as code_error:
+                        logger.warning(f"Could not verify {contract_label} contract code: {code_error}")
                 
                 # Prepare PIL (Programmable IP License) terms according to SDK documentation
                 # Terms must be an array, and cannot be empty
@@ -422,7 +440,7 @@ class StoryProtocolService:
                         allow_duplicates=True,
                         ip_metadata=ip_metadata,
                         recipient=creator_address,
-                        tx_options={'from': creator_address}
+                        tx_options={'from': self.account.address}
                     )
                     logger.info("Successfully used mint_and_register_ip_asset_with_pil_terms with full parameters")
                 except TypeError as type_error:
@@ -511,7 +529,8 @@ class StoryProtocolService:
                 raise RuntimeError("IP asset registration failed - no result returned")
 
             tx_hash = result.get('txHash')
-            logger.info(f"IP Asset registered successfully. IP ID: {result.get('ipId')}, TX: {tx_hash}")
+            license_terms_id = result.get('licenseTermsId') or result.get('pilTermsId')
+            logger.info(f"IP Asset registered successfully. IP ID: {result.get('ipId')}, TX: {tx_hash}, LicenseTermsId: {license_terms_id}")
 
             # Verify transaction receipt to ensure it actually succeeded on-chain
             if self.tx_manager and tx_hash:
@@ -529,6 +548,7 @@ class StoryProtocolService:
                         'transaction_hash': tx_hash,
                         'block_number': receipt.get('blockNumber'),
                         'gas_used': receipt.get('gasUsed'),
+                        'license_terms_id': license_terms_id,
                         'receipt': receipt,
                     }
                 except BlockchainTransactionError as e:
@@ -543,6 +563,7 @@ class StoryProtocolService:
                     'ip_id': result.get('ipId'),
                     'transaction_hash': tx_hash,
                     'block_number': result.get('blockNumber'),
+                    'license_terms_id': license_terms_id,
                 }
 
         except Exception as e:
@@ -569,11 +590,12 @@ class StoryProtocolService:
         ip_id: str,
         allow_derivatives: bool = True,
         commercial_use: bool = False,
-        royalty_percentage: int = 0
+        royalty_percentage: int = 0,
+        license_terms_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Attach license terms to an IP asset.
-        Uses Story Protocol's PIL (Programmable IP License).
+        Prefers licenseTermsId (SDK >=0.1). Legacy inline terms are no longer used.
 
         Args:
             ip_id: Story Protocol IP Asset ID
@@ -593,19 +615,13 @@ class StoryProtocolService:
         try:
             logger.info(f"Attaching license terms to IP: {ip_id}")
 
-            # Prepare license terms
-            license_terms = {
-                'allowDerivatives': allow_derivatives,
-                'commercialUse': commercial_use,
-                'royaltyPercentage': royalty_percentage,
-            }
+            if not license_terms_id:
+                raise RuntimeError("attach_license_terms requires license_terms_id (SDK >=0.1).")
 
-            logger.info(f"License terms: {license_terms}")
-
-            # Attach license using Story Protocol SDK
-            result = self.client.License.attach(
+            logger.info(f"Using existing license terms ID: {license_terms_id}")
+            result = self.client.License.attach_license_terms(
                 ipId=ip_id,
-                terms=license_terms
+                licenseTermsId=license_terms_id
             )
 
             logger.info(f"License terms attached successfully")
@@ -624,7 +640,7 @@ class StoryProtocolService:
         self,
         child_ip_id: str,
         parent_ip_ids: list,
-        license_terms: Optional[Dict] = None
+        license_terms_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Register an IP asset as a derivative of parent IP(s).
@@ -648,10 +664,13 @@ class StoryProtocolService:
             logger.info(f"Parent IPs: {parent_ip_ids}")
 
             # Register derivative relationship
+            if not license_terms_id:
+                raise RuntimeError("register_derivative requires license_terms_id (SDK >=0.1).")
+
             result = self.client.IPAsset.registerDerivative(
                 childIpId=child_ip_id,
                 parentIpIds=parent_ip_ids,
-                licenseTerms=license_terms or {}
+                licenseTermsId=license_terms_id,
             )
 
             tx_hash = result.get('txHash')

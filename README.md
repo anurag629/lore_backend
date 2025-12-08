@@ -87,9 +87,40 @@ Server runs at `http://localhost:8000`
   - GET `/assets/` - List all assets
   - POST `/assets/` - Create new asset
   - GET `/assets/{id}/` - Get asset details
-  - POST `/assets/{id}/derivatives/` - Create derivative
+  - POST `/assets/{id}/derivatives/` - Create derivative (supports multi-parent)
   - GET `/assets/{id}/royalty_balance/` - Check royalty balance
   - POST `/assets/{id}/claim_royalties/` - Claim royalties
+  - GET `/assets/{id}/royalty_payments/` - Payment history for an asset
+  - GET `/royalty_payments/{id}/` - Royalty payment detail
+
+- **Group IP:** `/api/groups/`
+  - GET `/groups/` - List group IPs
+  - POST `/groups/` - Create group IP
+  - GET `/groups/{id}/` - Get group IP detail
+  - PATCH `/groups/{id}/` - Update group IP metadata
+  - POST `/groups/{id}/register/` - Register group on-chain
+  - POST `/groups/{id}/members/` - Add member (asset-based)
+  - DELETE `/groups/{id}/members/{member_id}/` - Remove member
+  - GET `/groups/{id}/statistics/` - Group stats
+  - GET `/groups/{id}/distributions/` - Royalty distributions
+
+- **Disputes:** `/api/disputes/`
+  - GET `/disputes/` - List disputes with filters
+  - POST `/disputes/` - Raise dispute for an asset
+  - GET `/disputes/{id}/` - Dispute detail
+  - POST `/disputes/{id}/evidence/` - Submit evidence
+  - POST `/disputes/{id}/resolve/` - Resolve dispute (admin)
+  - POST `/disputes/{id}/cancel/` - Cancel dispute (disputer)
+  - GET `/disputes/{id}/statistics/` - Dispute stats
+
+- **Permissions:** `/api/permissions/`
+  - GET `/permissions/` - List permissions
+  - POST `/permissions/` - Grant/override permission
+  - GET `/permissions/{id}/` - Permission detail
+  - POST `/permissions/{id}/revoke/` - Revoke permission
+  - POST `/permissions/revoke_all/` - Revoke all for an asset
+  - GET `/permissions/asset/{asset_id}/` - Permissions for asset
+  - GET `/permissions/summary/{asset_id}/` - Summary/checks for asset
 
 - **AI Features:** `/api/assets/ai/`
   - POST `/generate-title/` - Generate title suggestions

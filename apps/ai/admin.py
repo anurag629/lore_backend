@@ -1,5 +1,9 @@
 from django.contrib import admin
-from .models import AIGenerationLog, AIAssetMetadata, AIUsageStats
+from .models import (
+    AIGenerationLog, AIAssetMetadata, AIUsageStats,
+    CopyrightAnalysisResult, QualityAnalysisResult,
+    PricingAnalysisResult, ValidationWorkflowResult
+)
 
 
 @admin.register(AIGenerationLog)
@@ -48,3 +52,61 @@ class AIUsageStatsAdmin(admin.ModelAdmin):
 
     def has_change_permission(self, request, obj=None):
         return False  # Read-only
+
+
+# ====================  AI AGENT RESULT ADMINS  ====================
+
+@admin.register(CopyrightAnalysisResult)
+class CopyrightAnalysisResultAdmin(admin.ModelAdmin):
+    """Admin interface for Copyright Analysis Results."""
+    list_display = ['id', 'asset', 'risk_level', 'similarity_score', 'is_likely_original', 'confidence', 'analyzed_at']
+    list_filter = ['risk_level', 'is_likely_original', 'analyzed_at']
+    search_fields = ['asset__title']
+    readonly_fields = ['asset', 'is_likely_original', 'similarity_score', 'risk_level', 'potential_matches', 'recommendations', 'confidence', 'processing_time', 'analyzed_at']
+    ordering = ['-analyzed_at']
+    raw_id_fields = ['asset']
+
+    def has_add_permission(self, request):
+        return False  # Results are auto-generated
+
+
+@admin.register(QualityAnalysisResult)
+class QualityAnalysisResultAdmin(admin.ModelAdmin):
+    """Admin interface for Quality Analysis Results."""
+    list_display = ['id', 'asset', 'overall_score', 'market_appeal', 'metadata_completeness', 'confidence', 'analyzed_at']
+    list_filter = ['analyzed_at']
+    search_fields = ['asset__title']
+    readonly_fields = ['asset', 'overall_score', 'technical_quality', 'description_quality', 'metadata_completeness', 'market_appeal', 'improvement_suggestions', 'strengths', 'confidence', 'processing_time', 'analyzed_at']
+    ordering = ['-analyzed_at']
+    raw_id_fields = ['asset']
+
+    def has_add_permission(self, request):
+        return False  # Results are auto-generated
+
+
+@admin.register(PricingAnalysisResult)
+class PricingAnalysisResultAdmin(admin.ModelAdmin):
+    """Admin interface for Pricing Analysis Results."""
+    list_display = ['id', 'asset', 'market_average', 'similar_assets_count', 'demand_prediction', 'confidence', 'analyzed_at']
+    list_filter = ['analyzed_at']
+    search_fields = ['asset__title']
+    readonly_fields = ['asset', 'suggested_tiers', 'market_average', 'similar_assets_count', 'demand_prediction', 'confidence', 'reasoning', 'processing_time', 'analyzed_at']
+    ordering = ['-analyzed_at']
+    raw_id_fields = ['asset']
+
+    def has_add_permission(self, request):
+        return False  # Results are auto-generated
+
+
+@admin.register(ValidationWorkflowResult)
+class ValidationWorkflowResultAdmin(admin.ModelAdmin):
+    """Admin interface for Validation Workflow Results."""
+    list_display = ['id', 'asset', 'workflow_status', 'overall_verdict', 'total_processing_time', 'started_at', 'completed_at']
+    list_filter = ['workflow_status', 'overall_verdict', 'started_at']
+    search_fields = ['asset__title']
+    readonly_fields = ['asset', 'workflow_status', 'steps_completed', 'overall_verdict', 'agent_results', 'warnings', 'blockers', 'total_processing_time', 'started_at', 'completed_at']
+    ordering = ['-started_at']
+    raw_id_fields = ['asset']
+
+    def has_add_permission(self, request):
+        return False  # Results are auto-generated

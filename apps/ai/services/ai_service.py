@@ -10,8 +10,142 @@ import logging
 import hashlib
 import json
 import time
+import re
 
 logger = logging.getLogger(__name__)
+
+
+class PromptSanitizer:
+    """
+    Sanitize user input to prevent prompt injection attacks.
+    Removes potentially dangerous patterns while preserving legitimate content.
+    """
+
+    # Patterns that could be used for prompt injection
+    DANGEROUS_PATTERNS = [
+        r'ignore\s+previous\s+instructions',
+        r'disregard\s+all\s+previous',
+        r'you\s+are\s+now',
+        r'forget\s+everything',
+        r'new\s+instructions?:',
+        r'system\s*:',
+        r'assistant\s*:',
+        r'</s>',
+        r'<\|endoftext\|>',
+        r'<\|im_start\|>',
+        r'<\|im_end\|>',
+        r'\[INST\]',
+        r'\[/INST\]',
+    ]
+
+    @staticmethod
+    def sanitize(text: str, max_length: int = 2000) -> str:
+        """
+        Sanitize user input for use in AI prompts.
+
+        Args:
+            text: User-provided text
+            max_length: Maximum allowed length
+
+        Returns:
+            Sanitized text safe for prompts
+        """
+        if not text:
+            return ""
+
+        # Truncate to max length
+        text = text[:max_length]
+
+        # Remove dangerous patterns (case-insensitive)
+        for pattern in PromptSanitizer.DANGEROUS_PATTERNS:
+            text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+
+        # Remove control characters except newlines and tabs
+        text = ''.join(
+            char for char in text
+            if char.isprintable() or char in '\n\t'
+        )
+
+        # Remove excessive newlines (more than 3 in a row)
+        text = re.sub(r'\n{4,}', '\n\n\n', text)
+
+        # Remove excessive whitespace
+        text = re.sub(r' {3,}', '  ', text)
+
+        return text.strip()
+
+
+class JSONResponseParser:
+    """
+    Robust parser for AI-generated JSON responses.
+    Handles various formats: markdown code blocks, plain JSON, malformed JSON.
+    """
+
+    @staticmethod
+    def extract_json(response_text: str) -> dict:
+        """
+        Extract JSON from AI response, handling various formats.
+
+        Handles:
+        - Markdown code blocks (```json ... ```)
+        - Plain JSON
+        - JSON with explanation text
+        - Minor formatting issues
+
+        Args:
+            response_text: Raw AI response text
+
+        Returns:
+            Parsed JSON dictionary
+
+        Raises:
+            ValueError: If no valid JSON can be extracted
+        """
+        if not response_text:
+            raise ValueError("Empty response text")
+
+        # Remove markdown code blocks
+        if '```' in response_text:
+            # Extract content between ```json and ``` or ``` and ```
+            matches = re.findall(r'```(?:json)?\s*\n?(.*?)\n?```', response_text, re.DOTALL)
+            if matches:
+                response_text = matches[0]
+
+        # Try to find JSON object or array
+        json_pattern = r'(\{[^}]*(?:\{[^}]*\}[^}]*)*\}|\[[^\]]*(?:\[[^\]]*\][^\]]*)*\])'
+        json_matches = re.findall(json_pattern, response_text, re.DOTALL)
+
+        for match in json_matches:
+            try:
+                return json.loads(match)
+            except json.JSONDecodeError:
+                continue
+
+        # Try direct parse
+        try:
+            return json.loads(response_text.strip())
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse JSON: {e}")
+            logger.debug(f"Response text (first 500 chars): {response_text[:500]}")
+            raise ValueError(f"Could not extract valid JSON from response")
+
+    @staticmethod
+    def parse_with_fallback(response_text: str, fallback: dict) -> dict:
+        """
+        Parse JSON with fallback on failure.
+
+        Args:
+            response_text: Raw AI response text
+            fallback: Dictionary to return if parsing fails
+
+        Returns:
+            Parsed JSON dictionary or fallback
+        """
+        try:
+            return JSONResponseParser.extract_json(response_text)
+        except (ValueError, json.JSONDecodeError) as e:
+            logger.warning(f"Using fallback response due to parse error: {e}")
+            return fallback
 
 
 class AIService:
@@ -144,6 +278,12 @@ class AIService:
         Returns:
             Tuple of (titles, model_used, response_time_ms, tokens_used, cache_hit)
         """
+        # Sanitize user input to prevent prompt injection
+        description = PromptSanitizer.sanitize(description, max_length=1000)
+        asset_type = ''
+        if context and context.get('asset_type'):
+            asset_type = PromptSanitizer.sanitize(context['asset_type'], max_length=50)
+
         cache_key = self._generate_cache_key('title', description=description, context=context)
         cache_hit = False
 
@@ -161,8 +301,7 @@ class AIService:
                     True  # cache_hit=True
                 )
 
-        # Build prompt
-        asset_type = context.get('asset_type', '') if context else ''
+        # Build prompt with sanitized input
         prompt = f"""Generate 4 creative, SEO-friendly titles (50-70 characters each) for:
 
 Description: {description}
@@ -205,6 +344,13 @@ Return ONLY the titles, one per line, without numbering."""
         Returns:
             Tuple of (enhanced_description, model_used, response_time_ms, tokens_used, cache_hit)
         """
+        # Sanitize all user inputs to prevent prompt injection
+        description = PromptSanitizer.sanitize(description, max_length=1000)
+        if title:
+            title = PromptSanitizer.sanitize(title, max_length=200)
+        if asset_type:
+            asset_type = PromptSanitizer.sanitize(asset_type, max_length=50)
+
         cache_key = self._generate_cache_key(
             'description',
             description=description,
@@ -265,6 +411,10 @@ Use vivid language, capture the mood, and appeal to collectors. Return only the 
         Returns:
             Tuple of (analysis_dict, model_used, response_time_ms, tokens_used, cache_hit)
         """
+        # Sanitize all user inputs to prevent prompt injection
+        title = PromptSanitizer.sanitize(title, max_length=200)
+        description = PromptSanitizer.sanitize(description, max_length=2000)
+
         cache_key = self._generate_cache_key(
             'analysis',
             title=title,
@@ -303,24 +453,17 @@ Return this EXACT JSON format (valid JSON only, no markdown):
             model_tier='quality'
         )
 
-        try:
-            # Remove markdown code blocks if present
-            cleaned_response = response_text.strip()
-            if cleaned_response.startswith('```'):
-                cleaned_response = cleaned_response.split('```')[1]
-                if cleaned_response.startswith('json'):
-                    cleaned_response = cleaned_response[4:]
-
-            analysis = json.loads(cleaned_response.strip())
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse JSON response: {e}")
-            analysis = {
+        # Parse JSON with robust fallback handling
+        analysis = JSONResponseParser.parse_with_fallback(
+            response_text,
+            fallback={
                 'category': 'digital_art',
                 'tags': [],
                 'art_style': None,
                 'theme': None,
                 'genre': None
             }
+        )
 
         if self.cache_enabled:
             cache.set(cache_key, {
@@ -347,6 +490,12 @@ Return this EXACT JSON format (valid JSON only, no markdown):
         Returns:
             Tuple of (suggestions_dict, model_used, response_time_ms, tokens_used, cache_hit)
         """
+        # Sanitize all user inputs to prevent prompt injection
+        asset_type = PromptSanitizer.sanitize(asset_type, max_length=50)
+        description = PromptSanitizer.sanitize(description, max_length=1000)
+        if intended_use:
+            intended_use = PromptSanitizer.sanitize(intended_use, max_length=200)
+
         cache_key = self._generate_cache_key(
             'license',
             asset_type=asset_type,
@@ -388,23 +537,16 @@ Return this EXACT JSON (valid JSON only, no markdown):
             model_tier='fast'
         )
 
-        try:
-            # Remove markdown code blocks if present
-            cleaned_response = response_text.strip()
-            if cleaned_response.startswith('```'):
-                cleaned_response = cleaned_response.split('```')[1]
-                if cleaned_response.startswith('json'):
-                    cleaned_response = cleaned_response[4:]
-
-            suggestions = json.loads(cleaned_response.strip())
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse JSON response: {e}")
-            suggestions = {
+        # Parse JSON response with robust parser
+        suggestions = JSONResponseParser.parse_with_fallback(
+            response_text,
+            fallback={
                 'royalty_percentage': 10,
                 'allow_derivatives': True,
                 'commercial_rights': False,
                 'reasoning': 'Default balanced terms'
             }
+        )
 
         if self.cache_enabled:
             cache.set(cache_key, {
@@ -433,6 +575,13 @@ Return this EXACT JSON (valid JSON only, no markdown):
         Returns:
             Tuple of (analysis_dict, model_used, response_time_ms, tokens_used, cache_hit)
         """
+        # Sanitize all user inputs to prevent prompt injection
+        parent_title = PromptSanitizer.sanitize(parent_title, max_length=200)
+        parent_description = PromptSanitizer.sanitize(parent_description, max_length=1000)
+        derivative_description = PromptSanitizer.sanitize(derivative_description, max_length=1000)
+        if derivative_title:
+            derivative_title = PromptSanitizer.sanitize(derivative_title, max_length=200)
+
         cache_key = self._generate_cache_key(
             'derivative',
             parent_title=parent_title,
@@ -475,23 +624,16 @@ Return this EXACT JSON (valid JSON only, no markdown):
             model_tier='quality'
         )
 
-        try:
-            # Remove markdown code blocks if present
-            cleaned_response = response_text.strip()
-            if cleaned_response.startswith('```'):
-                cleaned_response = cleaned_response.split('```')[1]
-                if cleaned_response.startswith('json'):
-                    cleaned_response = cleaned_response[4:]
-
-            analysis = json.loads(cleaned_response.strip())
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse JSON response: {e}")
-            analysis = {
+        # Parse JSON response with robust parser
+        analysis = JSONResponseParser.parse_with_fallback(
+            response_text,
+            fallback={
                 'similarity_score': 0.5,
                 'transformation_type': 'stylistic_remix',
                 'suggested_attribution': f'Inspired by "{parent_title}"',
                 'key_differences': []
             }
+        )
 
         if self.cache_enabled:
             cache.set(cache_key, {

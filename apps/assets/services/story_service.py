@@ -12,6 +12,8 @@ from django.conf import settings
 from web3 import Web3
 from story_protocol_python_sdk import StoryClient
 import logging
+from .blockchain_utils import get_transaction_manager, BlockchainTransactionError
+from apps.core.web3_utils import WalletAddressValidator, InvalidAddressError
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,7 @@ class StoryProtocolService:
         self.web3 = None
         self.client = None
         self.account = None
+        self.tx_manager = None
         self._initialize_client()
 
     def _initialize_client(self):
@@ -77,6 +80,9 @@ class StoryProtocolService:
                 chain_id=chain_id
             )
 
+            # Initialize transaction manager for receipt verification
+            self.tx_manager = get_transaction_manager(self.web3)
+
             logger.info(f"Story Protocol client initialized for chain ID: {chain_id}")
 
         except Exception as e:
@@ -92,7 +98,7 @@ class StoryProtocolService:
             and self.account is not None
         )
 
-    async def register_ip_asset(
+    def register_ip_asset(
         self,
         metadata_uri: str,
         metadata_hash: str,
@@ -127,20 +133,28 @@ class StoryProtocolService:
         try:
             logger.info(f"Registering IP asset for creator: {creator_address}")
             logger.info(f"Metadata URI: {metadata_uri}")
-            logger.info(f"Metadata hash: {metadata_hash[:20]}... (length: {len(metadata_hash)})")
+
+            # Validate required parameters
+            if not metadata_uri:
+                raise ValueError("metadata_uri is required but was None or empty")
+            if not metadata_hash:
+                raise ValueError("metadata_hash is required but was None or empty")
+
+            hash_preview = metadata_hash[:20] + '...' if len(metadata_hash) > 20 else metadata_hash
+            logger.info(f"Metadata hash: {hash_preview} (length: {len(metadata_hash)})")
 
             # Ensure metadata_hash is in correct format
             # Story Protocol SDK expects hex string - keep 0x prefix for hash
             if not metadata_hash.startswith('0x'):
                 metadata_hash = '0x' + metadata_hash
             
-            # Ensure creator_address is checksummed (required by Web3.py)
+            # Validate and checksum creator_address using WalletAddressValidator
             try:
-                creator_address = self.web3.to_checksum_address(creator_address)
-                logger.info(f"Checksummed creator address: {creator_address}")
-            except Exception as e:
-                logger.error(f"Failed to checksum creator address {creator_address}: {e}")
-                raise RuntimeError(f"Invalid creator address format: {creator_address}. Error: {e}")
+                creator_address = WalletAddressValidator.checksum(creator_address)
+                logger.info(f"Validated and checksummed creator address: {creator_address}")
+            except InvalidAddressError as e:
+                logger.error(f"Invalid creator address {creator_address}: {e}")
+                raise RuntimeError(f"Invalid creator address: {creator_address}. Error: {e}")
 
             # Register IP Asset using Story Protocol SDK
             # According to SDK docs: register() requires nft_contract and token_id
@@ -159,7 +173,8 @@ class StoryProtocolService:
                 'ip_metadata_uri': metadata_uri,
                 'ip_metadata_hash': metadata_hash,
             }
-            logger.info(f"IP metadata prepared: uri={metadata_uri}, hash={metadata_hash[:20]}...")
+            hash_preview = metadata_hash[:20] + '...' if metadata_hash and len(metadata_hash) > 20 else metadata_hash
+            logger.info(f"IP metadata prepared: uri={metadata_uri}, hash={hash_preview}")
             
             # Initialize result variable
             result = None
@@ -249,7 +264,7 @@ class StoryProtocolService:
                         logger.error(error_msg)
                         raise RuntimeError(error_msg)
                     else:
-                        logger.info(f"✓ SPG NFT Contract {spg_nft_contract} verified (code length: {len(code)} bytes)")
+                        logger.info(f"[OK] SPG NFT Contract {spg_nft_contract} verified (code length: {len(code)} bytes)")
                 except RuntimeError:
                     # Re-raise our custom error
                     raise
@@ -328,13 +343,15 @@ class StoryProtocolService:
                     }
                 elif allow_derivatives:
                     # Non-Commercial Remix License
+                    # SDK REQUIREMENT: When commercial_use=False, royalty_policy MUST be ZERO_ADDRESS
+                    # See: license_terms.py line 243-246 verify_commercial_use()
                     pil_terms_data = {
                         "transferable": True,
-                        "royalty_policy": royalty_policy,
+                        "royalty_policy": "0x0000000000000000000000000000000000000000",  # MUST be zero for non-commercial
                         "default_minting_fee": 0,
                         "expiration": 0,
                         "commercial_use": False,
-                        "commercial_attribution": True,
+                        "commercial_attribution": False,  # Must be False when commercial_use is False
                         "commercializer_checker": "0x0000000000000000000000000000000000000000",
                         "commercializer_checker_data": "0x0000000000000000000000000000000000000000",
                         "commercial_rev_share": 0,
@@ -344,18 +361,19 @@ class StoryProtocolService:
                         "derivatives_approval": False,
                         "derivatives_reciprocal": True,
                         "derivative_rev_ceiling": 0,
-                        "currency": currency,
+                        "currency": "0x0000000000000000000000000000000000000000",  # Can be zero for non-commercial
                         "uri": "",
                     }
                 else:
-                    # Commercial Use Only License (no derivatives)
+                    # Commercial Use Only License (no derivatives) OR Non-commercial, no derivatives
+                    # SDK REQUIREMENT: royalty_policy must be ZERO_ADDRESS if commercial_use=False
                     pil_terms_data = {
                         "transferable": True,
-                        "royalty_policy": royalty_policy,
+                        "royalty_policy": royalty_policy if commercial_use else "0x0000000000000000000000000000000000000000",
                         "default_minting_fee": 0,
                         "expiration": 0,
                         "commercial_use": commercial_use,
-                        "commercial_attribution": True,
+                        "commercial_attribution": commercial_use,  # Only True if commercial_use is True
                         "commercializer_checker": "0x0000000000000000000000000000000000000000",
                         "commercializer_checker_data": "0x0000000000000000000000000000000000000000",
                         "commercial_rev_share": min(royalty_percentage, 100) if commercial_use else 0,
@@ -365,7 +383,7 @@ class StoryProtocolService:
                         "derivatives_approval": False,
                         "derivatives_reciprocal": False,
                         "derivative_rev_ceiling": 0,
-                        "currency": currency,
+                        "currency": currency if commercial_use else "0x0000000000000000000000000000000000000000",
                         "uri": "",
                     }
                     
@@ -491,14 +509,41 @@ class StoryProtocolService:
             # Check if registration was successful
             if result is None:
                 raise RuntimeError("IP asset registration failed - no result returned")
-            
-            logger.info(f"IP Asset registered successfully. IP ID: {result.get('ipId')}")
 
-            return {
-                'ip_id': result.get('ipId'),
-                'transaction_hash': result.get('txHash'),
-                'block_number': result.get('blockNumber'),
-            }
+            tx_hash = result.get('txHash')
+            logger.info(f"IP Asset registered successfully. IP ID: {result.get('ipId')}, TX: {tx_hash}")
+
+            # Verify transaction receipt to ensure it actually succeeded on-chain
+            if self.tx_manager and tx_hash:
+                try:
+                    logger.info(f"Verifying transaction receipt for {tx_hash}")
+                    receipt = self.tx_manager.wait_for_receipt(tx_hash, timeout=120)
+
+                    logger.info(
+                        f"Transaction confirmed in block {receipt.get('blockNumber')}, "
+                        f"gas used: {receipt.get('gasUsed')}"
+                    )
+
+                    return {
+                        'ip_id': result.get('ipId'),
+                        'transaction_hash': tx_hash,
+                        'block_number': receipt.get('blockNumber'),
+                        'gas_used': receipt.get('gasUsed'),
+                        'receipt': receipt,
+                    }
+                except BlockchainTransactionError as e:
+                    logger.error(f"Transaction verification failed: {e}")
+                    raise RuntimeError(
+                        f"IP asset registration transaction failed verification: {str(e)}"
+                    )
+            else:
+                # Fallback if tx_manager not available (shouldn't happen)
+                logger.warning("Transaction manager not available, skipping receipt verification")
+                return {
+                    'ip_id': result.get('ipId'),
+                    'transaction_hash': tx_hash,
+                    'block_number': result.get('blockNumber'),
+                }
 
         except Exception as e:
             error_msg = str(e)
@@ -519,7 +564,7 @@ class StoryProtocolService:
             
             raise Exception(f"Failed to register IP asset: {error_msg}. Please check Story Protocol SDK documentation for correct method signature.")
 
-    async def attach_license_terms(
+    def attach_license_terms(
         self,
         ip_id: str,
         allow_derivatives: bool = True,
@@ -575,7 +620,7 @@ class StoryProtocolService:
             logger.error(f"Failed to attach license terms: {str(e)}")
             raise
 
-    async def register_derivative(
+    def register_derivative(
         self,
         child_ip_id: str,
         parent_ip_ids: list,
@@ -609,18 +654,44 @@ class StoryProtocolService:
                 licenseTerms=license_terms or {}
             )
 
-            logger.info(f"Derivative registered successfully")
+            tx_hash = result.get('txHash')
+            logger.info(f"Derivative registered successfully. TX: {tx_hash}")
 
-            return {
-                'transaction_hash': result.get('txHash'),
-                'block_number': result.get('blockNumber'),
-            }
+            # Verify transaction receipt to ensure it actually succeeded on-chain
+            if self.tx_manager and tx_hash:
+                try:
+                    logger.info(f"Verifying derivative registration transaction receipt for {tx_hash}")
+                    receipt = self.tx_manager.wait_for_receipt(tx_hash, timeout=120)
+
+                    logger.info(
+                        f"Derivative transaction confirmed in block {receipt.get('blockNumber')}, "
+                        f"gas used: {receipt.get('gasUsed')}"
+                    )
+
+                    return {
+                        'transaction_hash': tx_hash,
+                        'block_number': receipt.get('blockNumber'),
+                        'gas_used': receipt.get('gasUsed'),
+                        'receipt': receipt,
+                    }
+                except BlockchainTransactionError as e:
+                    logger.error(f"Derivative registration transaction verification failed: {e}")
+                    raise RuntimeError(
+                        f"Derivative registration transaction failed verification: {str(e)}"
+                    )
+            else:
+                # Fallback if tx_manager not available
+                logger.warning("Transaction manager not available, skipping receipt verification")
+                return {
+                    'transaction_hash': tx_hash,
+                    'block_number': result.get('blockNumber'),
+                }
 
         except Exception as e:
             logger.error(f"Failed to register derivative: {str(e)}")
             raise
 
-    async def claim_royalties(
+    def claim_royalties(
         self,
         ip_id: str,
         claimer_address: str
@@ -669,7 +740,7 @@ class StoryProtocolService:
             logger.error(f"Failed to claim royalties: {str(e)}")
             raise
 
-    async def get_royalty_balance(
+    def get_royalty_balance(
         self,
         ip_id: str,
         address: str

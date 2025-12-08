@@ -7,6 +7,7 @@ import json
 from typing import Dict, Any, Optional, BinaryIO
 from django.conf import settings
 from django.core.files.uploadedfile import InMemoryUploadedFile
+from apps.core.retry_utils import retry_with_backoff, RetryConfig
 
 
 class PinataService:
@@ -24,6 +25,10 @@ class PinataService:
             'pinata_secret_api_key': self.api_secret,
         }
 
+    @retry_with_backoff(
+        exceptions=(requests.exceptions.RequestException, requests.exceptions.Timeout),
+        config=RetryConfig(max_attempts=4, base_delay=2.0, exponential_base=2.0, max_delay=30.0)
+    )
     def upload_file(self, file: InMemoryUploadedFile, filename: Optional[str] = None) -> Dict[str, str]:
         """
         Upload a file to Pinata IPFS
@@ -76,6 +81,10 @@ class PinataService:
         except requests.exceptions.RequestException as e:
             raise Exception(f"Failed to upload file to Pinata: {str(e)}")
 
+    @retry_with_backoff(
+        exceptions=(requests.exceptions.RequestException, requests.exceptions.Timeout),
+        config=RetryConfig(max_attempts=4, base_delay=2.0, exponential_base=2.0, max_delay=30.0)
+    )
     def upload_json(self, data: Dict[str, Any], name: Optional[str] = None) -> Dict[str, str]:
         """
         Upload JSON metadata to Pinata IPFS

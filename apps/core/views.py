@@ -2,6 +2,8 @@
 Authentication views for SIWE (Sign-In with Ethereum)
 """
 from django.core.cache import cache
+from django.core.exceptions import ValidationError
+from django.conf import settings
 from django.db import connection
 from django.utils import timezone
 from rest_framework import status
@@ -24,6 +26,7 @@ from apps.core.serializers import (
 from apps.core.utils import generate_nonce, create_siwe_message
 from apps.core.models import LoreUser
 from apps.assets.cache import get_cached_user_profile, cache_user_profile
+from apps.assets.validators import validate_file_name, validate_file_size, validate_file_type, validate_image_content
 
 
 @api_view(['POST'])
@@ -57,7 +60,7 @@ def get_nonce(request):
         domain=domain,
         wallet_address=wallet_address,
         nonce=nonce,
-        chain_id=1,  # Mainnet - change based on your needs
+        chain_id=settings.STORY_PROTOCOL_CHAIN_ID,  # Configured chain ID
         uri=f"{request.scheme}://{request.get_host()}"
     )
 
@@ -165,18 +168,16 @@ def upload_avatar(request):
     
     avatar_file = request.FILES['avatar']
     
-    # Validate file type
-    allowed_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
-    if avatar_file.content_type not in allowed_types:
-        return Response(
-            {'error': 'Invalid file type. Only JPEG, PNG, and WebP are allowed.'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
     
-    # Validate file size (max 5MB)
-    if avatar_file.size > 5 * 1024 * 1024:
+    # Comprehensive validation using validator functions
+    try:
+        validate_file_name(avatar_file)
+        validate_file_size(avatar_file)
+        validate_file_type(avatar_file)
+        validate_image_content(avatar_file)  # Pillow-based content validation
+    except ValidationError as e:
         return Response(
-            {'error': 'File size too large. Maximum size is 5MB.'},
+            {'error': str(e)},
             status=status.HTTP_400_BAD_REQUEST
         )
     
@@ -226,18 +227,16 @@ def upload_banner(request):
     
     banner_file = request.FILES['banner']
     
-    # Validate file type
-    allowed_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
-    if banner_file.content_type not in allowed_types:
-        return Response(
-            {'error': 'Invalid file type. Only JPEG, PNG, and WebP are allowed.'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
     
-    # Validate file size (max 10MB for banners)
-    if banner_file.size > 10 * 1024 * 1024:
+    # Comprehensive validation using validator functions
+    try:
+        validate_file_name(banner_file)
+        validate_file_size(banner_file)
+        validate_file_type(banner_file)
+        validate_image_content(banner_file)  # Pillow-based content validation
+    except ValidationError as e:
         return Response(
-            {'error': 'File size too large. Maximum size is 10MB.'},
+            {'error': str(e)},
             status=status.HTTP_400_BAD_REQUEST
         )
     
@@ -287,6 +286,18 @@ def update_profile(request):
     )
     serializer.is_valid(raise_exception=True)
     serializer.save()
+
+    # Invalidate user-related caches
+    user_wallet = request.user.wallet_address.lower()
+    cache_keys = [
+        f'user_profile_{user_wallet}',
+        f'user_assets_{user_wallet}',
+        f'user_stats_{user_wallet}',
+    ]
+    for key in cache_keys:
+        cache.delete(key)
+    
+    logger.info(f"Invalidated cache for user {user_wallet} after profile update")
 
     return Response(serializer.data, status=status.HTTP_200_OK)
 

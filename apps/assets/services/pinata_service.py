@@ -186,14 +186,16 @@ class PinataService:
 
         # Calculate metadata hash (Story Protocol expects keccak256)
         metadata_json = json.dumps(metadata, sort_keys=True)
-        # keccak256 over the JSON bytes, return hex without 0x
-        hash_digest = Web3.keccak(text=metadata_json).hex()[2:]
-        metadata_hash = hash_digest
+        # keccak256 over the JSON bytes
+        hash_bytes = Web3.keccak(text=metadata_json)
+        # Get hex string without 0x prefix, ensure exactly 64 chars
+        hash_digest = hash_bytes.hex()[2:]  # Remove '0x' prefix
+        hash_digest = hash_digest.zfill(64)  # Ensure 64 hex chars (should already be, but be safe)
 
         return {
             **result,
-            'hash': metadata_hash,
-            'hash_with_prefix': '0x' + hash_digest,  # For display/logging
+            'hash': hash_digest,                     # 64 chars without 0x
+            'hash_with_prefix': '0x' + hash_digest,  # 66 chars with 0x prefix
             'metadata': metadata
         }
 

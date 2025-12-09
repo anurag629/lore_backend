@@ -108,3 +108,59 @@ def validate_media_url(url):
     except ValidationError:
         raise ValidationError('Invalid media_url format. Must be a valid URL.')
 
+
+def validate_image_content(file):
+    """
+    Validate image file content using Pillow.
+    
+    This performs actual file parsing to ensure the file is a valid image
+    and not just a renamed file with an image extension.
+    
+    Args:
+        file: Django uploaded file object
+        
+    Returns:
+        tuple: (format, width, height) of the validated image
+        
+    Raises:
+        ValidationError: If file is not a valid image or is corrupted
+    """
+    try:
+        from PIL import Image
+        
+        file.seek(0)
+        img = Image.open(file)
+        
+        # Verify image
+        img.verify()
+        
+        # Re-open for getting dimensions (verify() closes the file)
+        file.seek(0)
+        img = Image.open(file)
+        
+        format = img.format
+        width, height = img.size
+        
+        # Validate format
+        allowed_formats = ['JPEG', 'PNG', 'GIF', 'WEBP']
+        if format not in allowed_formats:
+            raise ValidationError(
+                f'Image format {format} not allowed. Allowed formats: {", ".join(allowed_formats)}'
+            )
+        
+        # Validate dimensions (prevent DOS via huge images)
+        MAX_DIMENSION = 10000  # 10000x10000 pixels max
+        if width > MAX_DIMENSION or height > MAX_DIMENSION:
+            raise ValidationError(
+                f'Image dimensions ({width}x{height}) exceed maximum allowed size ({MAX_DIMENSION}x{MAX_DIMENSION})'
+            )
+        
+        # Reset file pointer for subsequent operations
+        file.seek(0)
+        
+        return (format, width, height)
+        
+    except ValidationError:
+        raise
+    except Exception as e:
+        raise ValidationError(f'Invalid or corrupted image file: {str(e)}')

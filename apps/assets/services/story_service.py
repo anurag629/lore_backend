@@ -98,13 +98,95 @@ class StoryProtocolService:
             and self.account is not None
         )
 
-    def _build_ip_metadata(self, metadata_uri: str, metadata_hash: str) -> Dict[str, str]:
+    def create_spg_nft_collection(
+        self,
+        name: str = "Lore IP Collection",
+        symbol: str = "LORE",
+        contract_uri: str = "",
+        is_public_minting: bool = True,
+        mint_open: bool = True,
+    ) -> Dict[str, Any]:
         """
-        Build IP metadata payload using camelCase keys (per SDK docs).
+        Create a new SPG NFT collection for IP asset registration.
+
+        This should be called ONCE to create a collection, then the returned
+        nft_contract address should be stored in STORY_PROTOCOL_SPG_NFT_CONTRACT.
+
+        Args:
+            name: Collection name
+            symbol: Collection symbol (e.g., "LORE")
+            contract_uri: URI for collection metadata (optional)
+            is_public_minting: If True, anyone can mint. If False, only minter role can mint.
+            mint_open: Whether minting is open on creation
+
+        Returns:
+            Dict containing:
+                - nft_contract: The deployed collection contract address
+                - tx_hash: Transaction hash of creation
         """
+        if not self.is_ready():
+            raise RuntimeError("Story Protocol service not properly initialized")
+
+        try:
+            logger.info(f"Creating SPG NFT collection: {name} ({symbol})")
+
+            result = self.client.NFTClient.create_nft_collection(
+                name=name,
+                symbol=symbol,
+                is_public_minting=is_public_minting,
+                mint_open=mint_open,
+                mint_fee_recipient=self.account.address,
+                contract_uri=contract_uri or f"https://lore.app/collection/{symbol.lower()}",
+            )
+
+            logger.info(f"SPG NFT Collection created: {result['nft_contract']}")
+            logger.info(f"IMPORTANT: Update STORY_PROTOCOL_SPG_NFT_CONTRACT={result['nft_contract']} in your .env file")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Failed to create SPG NFT collection: {str(e)}")
+            raise
+
+    def _build_ip_metadata(
+        self,
+        metadata_uri: str,
+        metadata_hash: str,
+        nft_metadata_uri: str = "",
+        nft_metadata_hash: str = ""
+    ) -> Dict[str, str]:
+        """
+        Build IP metadata payload using snake_case keys as expected by SDK.
+
+        The SDK's mint_and_register_ip_asset_with_pil_terms() method extracts values using:
+        - ip_metadata.get("ip_metadata_uri", "")
+        - ip_metadata.get("ip_metadata_hash", ZERO_HASH)
+        - ip_metadata.get("nft_metadata_uri", "")
+        - ip_metadata.get("nft_metadata_hash", ZERO_HASH)
+
+        See: story_protocol_python_sdk/resources/IPAsset.py lines 456-468
+        """
+        # Ensure hash has proper 0x prefix and length (66 chars total)
+        if metadata_hash and not metadata_hash.startswith('0x'):
+            metadata_hash = '0x' + metadata_hash
+        if metadata_hash and len(metadata_hash) < 66:
+            metadata_hash = '0x' + metadata_hash[2:].zfill(64)
+
+        # Use same values for NFT metadata if not provided
+        nft_uri = nft_metadata_uri or metadata_uri
+        nft_hash = nft_metadata_hash or metadata_hash
+
+        # Ensure NFT hash also has proper format
+        if nft_hash and not nft_hash.startswith('0x'):
+            nft_hash = '0x' + nft_hash
+        if nft_hash and len(nft_hash) < 66:
+            nft_hash = '0x' + nft_hash[2:].zfill(64)
+
         return {
-            'ipMetadataURI': metadata_uri,
-            'ipMetadataHash': metadata_hash,
+            'ip_metadata_uri': metadata_uri,      # snake_case as SDK expects
+            'ip_metadata_hash': metadata_hash,    # snake_case as SDK expects
+            'nft_metadata_uri': nft_uri,          # snake_case as SDK expects
+            'nft_metadata_hash': nft_hash,        # snake_case as SDK expects
         }
 
     def register_ip_asset(
@@ -176,8 +258,13 @@ class StoryProtocolService:
             logger.info(f"Available IPAsset methods: {ip_asset_methods}")
             
             # Prepare IP metadata dict according to SDK documentation
-            # ip_metadata_hash should be a hex string (with 0x prefix)
-            ip_metadata = self._build_ip_metadata(metadata_uri, metadata_hash)
+            # SDK expects snake_case keys: ip_metadata_uri, ip_metadata_hash, nft_metadata_uri, nft_metadata_hash
+            ip_metadata = self._build_ip_metadata(
+                metadata_uri=metadata_uri,
+                metadata_hash=metadata_hash,
+                nft_metadata_uri=metadata_uri,    # Reuse IP metadata URI for NFT
+                nft_metadata_hash=metadata_hash   # Reuse IP metadata hash for NFT
+            )
             hash_preview = metadata_hash[:20] + '...' if metadata_hash and len(metadata_hash) > 20 else metadata_hash
             logger.info(f"IP metadata prepared: uri={metadata_uri}, hash={hash_preview}")
             
@@ -528,9 +615,18 @@ class StoryProtocolService:
             if result is None:
                 raise RuntimeError("IP asset registration failed - no result returned")
 
-            tx_hash = result.get('txHash')
-            license_terms_id = result.get('licenseTermsId') or result.get('pilTermsId')
-            logger.info(f"IP Asset registered successfully. IP ID: {result.get('ipId')}, TX: {tx_hash}, LicenseTermsId: {license_terms_id}")
+            # SDK returns snake_case keys: tx_hash, ip_id, license_terms_ids, token_id
+            # Also check camelCase for backward compatibility with older SDK versions
+            tx_hash = result.get('tx_hash') or result.get('txHash')
+            ip_id = result.get('ip_id') or result.get('ipId')
+            license_terms_id = (
+                result.get('license_terms_ids', [None])[0] if isinstance(result.get('license_terms_ids'), list)
+                else result.get('license_terms_ids') or result.get('licenseTermsId') or result.get('pilTermsId')
+            )
+            token_id = result.get('token_id') or result.get('tokenId')
+
+            logger.info(f"IP Asset registered successfully. IP ID: {ip_id}, TX: {tx_hash}, LicenseTermsId: {license_terms_id}, TokenId: {token_id}")
+            logger.info(f"Full SDK response: {result}")
 
             # Verify transaction receipt to ensure it actually succeeded on-chain
             if self.tx_manager and tx_hash:
@@ -544,11 +640,12 @@ class StoryProtocolService:
                     )
 
                     return {
-                        'ip_id': result.get('ipId'),
+                        'ip_id': ip_id,
                         'transaction_hash': tx_hash,
                         'block_number': receipt.get('blockNumber'),
                         'gas_used': receipt.get('gasUsed'),
                         'license_terms_id': license_terms_id,
+                        'token_id': token_id,
                         'receipt': receipt,
                     }
                 except BlockchainTransactionError as e:
@@ -560,10 +657,11 @@ class StoryProtocolService:
                 # Fallback if tx_manager not available (shouldn't happen)
                 logger.warning("Transaction manager not available, skipping receipt verification")
                 return {
-                    'ip_id': result.get('ipId'),
+                    'ip_id': ip_id,
                     'transaction_hash': tx_hash,
-                    'block_number': result.get('blockNumber'),
+                    'block_number': result.get('blockNumber') or result.get('block_number'),
                     'license_terms_id': license_terms_id,
+                    'token_id': token_id,
                 }
 
         except Exception as e:
@@ -825,6 +923,52 @@ class StoryProtocolService:
 
         except Exception as e:
             logger.error(f"Failed to get IP asset details: {str(e)}")
+            raise
+
+    def set_ip_account_permission(
+        self,
+        ip_id: str,
+        grantee: str,
+        permission_type: str,
+        is_granted: bool
+    ) -> Dict[str, Any]:
+        """
+        Set permission for an IP Account on Story Protocol.
+
+        Args:
+            ip_id: Story Protocol IP Asset ID
+            grantee: Address to grant/revoke permission
+            permission_type: Type of permission
+            is_granted: True to grant, False to revoke
+
+        Returns:
+            Dict with transaction details
+        """
+        if not self.is_ready():
+            raise RuntimeError("Story Protocol service not properly initialized")
+
+        try:
+            logger.info(f"Setting {permission_type} permission for {grantee} on {ip_id}: {is_granted}")
+
+            # Call Story Protocol SDK to set permission
+            # Note: Actual SDK method may vary - check SDK documentation
+            result = self.client.IPAccount.setPermission(
+                ipId=ip_id,
+                signer=grantee,
+                permission=is_granted
+            )
+
+            tx_hash = result.get("txHash") or result.get("transactionHash")
+            logger.info(f"Permission set on-chain. TX: {tx_hash}")
+
+            return {
+                "transaction_hash": tx_hash,
+                "block_number": result.get("blockNumber"),
+                "gas_used": result.get("gasUsed"),
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to set permission on-chain: {e}")
             raise
 
 

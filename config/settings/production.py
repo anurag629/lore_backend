@@ -77,3 +77,7 @@ LOGGING = {
         },
     },
 }
+
+# Validate settings after all overrides are applied
+from config.settings.validator import validate_settings_on_startup
+validate_settings_on_startup()

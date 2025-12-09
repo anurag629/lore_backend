@@ -246,8 +246,8 @@ class AIService:
         """Check if model is currently rate limited"""
         return cache.get(f"ai_rate_limit_{model}") is not None
 
-    def _mark_rate_limited(self, model: str, duration: int = 60):
-        """Mark model as rate limited for specified duration (seconds)"""
+    def _mark_rate_limited(self, model: str, duration: int = 300):
+        """Mark model as rate limited for specified duration (seconds, default: 300s = 5 minutes)"""
         cache.set(f"ai_rate_limit_{model}", True, duration)
         logger.info(f"Marked {model} as rate limited for {duration}s")
 

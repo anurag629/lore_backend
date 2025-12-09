@@ -84,27 +84,33 @@ class PermissionService:
         except Exception as e:
             raise ValueError(f"Invalid grantee address: {e}")
 
-        # TODO: Call Story Protocol to set permission on-chain
-        # For now, we'll just create the permission in the database
+        # Call Story Protocol to set permission on-chain
+        transaction_hash = ''
         if self.story_service and self.story_service.is_ready():
             try:
-                # Placeholder for blockchain call
                 logger.info(
                     f"Setting permission {permission_type} for asset {asset.story_ip_id} "
                     f"to {grantee_address}: {is_granted}"
                 )
-                # result = self.story_service.set_permission(
-                #     ip_id=asset.story_ip_id,
-                #     grantee=grantee_address,
-                #     permission=permission_type,
-                #     is_granted=is_granted
-                # )
-                # transaction_hash = result.get('transaction_hash', '')
-                transaction_hash = ''
+                
+                # Call Story Protocol SDK to set permission
+                result = self.story_service.set_ip_account_permission(
+                    ip_id=asset.story_ip_id,
+                    grantee=grantee_address,
+                    permission_type=permission_type,
+                    is_granted=is_granted
+                )
+                
+                transaction_hash = result.get('transaction_hash', '')
+                logger.info(f"Permission {'granted' if is_granted else 'revoked'} on-chain. TX: {transaction_hash}")
+                
             except Exception as e:
                 logger.error(f"Failed to set permission on-chain: {e}")
+                # Continue with database update even if blockchain call fails
+                # This allows graceful degradation
                 transaction_hash = ''
         else:
+            logger.warning("Story Protocol service not ready, skipping on-chain permission")
             transaction_hash = ''
 
         # Create or update permission in database

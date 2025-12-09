@@ -42,7 +42,7 @@ class IPAsset(models.Model):
     )
 
     media_url = models.URLField(
-        help_text="URL to media file (Azure Blob Storage)"
+        help_text="URL to media file (IPFS via Pinata)"
     )
 
     metadata_hash = models.CharField(

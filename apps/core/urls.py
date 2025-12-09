@@ -3,6 +3,7 @@ URL configuration for authentication endpoints
 """
 from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
+from apps.core.throttles import TokenRefreshThrottle
 
 from apps.core import views
 
@@ -16,7 +17,7 @@ urlpatterns = [
     path('logout/', views.logout, name='logout'),
 
     # JWT Token Management
-    path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('token/refresh/', TokenRefreshView.as_view(throttle_classes=[TokenRefreshThrottle]), name='token_refresh'),
 
     # User Profile
     path('me/', views.get_current_user, name='current_user'),

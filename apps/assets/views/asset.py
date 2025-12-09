@@ -741,7 +741,20 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                 {'error': 'Permission denied'},
                 status=status.HTTP_403_FORBIDDEN
             )
+
+        # Rate limiting for retries (max 5 retries per hour per asset)
+        cache_key = f'retry_reg_limit_{asset.uuid}'
+        retry_count = cache.get(cache_key, 0)
+        MAX_RETRIES_PER_HOUR = 5
         
+        if retry_count >= MAX_RETRIES_PER_HOUR:
+            return Response(
+                {'error': f'Retry limit exceeded. Maximum {MAX_RETRIES_PER_HOUR} retries per hour.'},
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
+        
+        cache.set(cache_key, retry_count + 1, timeout=3600)  # 1 hour
+
         # Check if asset is in failed state
         if asset.registration_status not in ['failed', 'pending']:
             return Response(
@@ -772,9 +785,28 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE
             )
         
-        # Get metadata URI from Pinata (reconstruct from hash)
-        pinata_service = get_pinata_service()
-        metadata_uri = f"ipfs://{asset.metadata_hash}"
+        # Get metadata URI from step_data (stored during initial creation)
+        # The metadata_hash is a keccak256 hash, NOT the IPFS CID
+        metadata_uri = None
+        if asset.step_data and 'metadata_upload' in asset.step_data:
+            metadata_uri = asset.step_data['metadata_upload'].get('uri')
+
+        if not metadata_uri:
+            # Fallback: try to get IPFS hash and construct URI
+            ipfs_hash = None
+            if asset.step_data and 'metadata_upload' in asset.step_data:
+                ipfs_hash = asset.step_data['metadata_upload'].get('ipfs_hash')
+
+            if ipfs_hash:
+                metadata_uri = f"ipfs://{ipfs_hash}"
+            else:
+                return Response(
+                    {
+                        'error': 'Cannot retry registration',
+                        'detail': 'Metadata URI is missing. Please recreate the asset.'
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
         
         # Normalize and checksum wallet address
         from web3 import Web3

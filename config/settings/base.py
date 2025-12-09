@@ -18,7 +18,12 @@ env = environ.Env(
 environ.Env.read_env(BASE_DIR / '.env')
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = env('SECRET_KEY', default='django-insecure-change-this-in-production')
+SECRET_KEY = env('SECRET_KEY')  # No default - must be set explicitly
+# Debug mode - should be False in production
+DEBUG = env.bool('DEBUG', default=False)
+
+# Allowed hosts - must be configured when DEBUG=False
+ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=[])
 
 # Application definition
 INSTALLED_APPS = [
@@ -132,6 +137,7 @@ REST_FRAMEWORK = {
         'user': '1000/hour',     # Authenticated users
         'ai': '50/hour',         # AI endpoints (more restrictive)
         'upload': '10/hour',     # File uploads
+        'token_refresh': '10/minute',  # Token refresh rate limiting
     },
     'EXCEPTION_HANDLER': 'apps.core.exceptions.custom_exception_handler',
     'DEFAULT_FILTER_BACKENDS': [
@@ -334,3 +340,8 @@ if JSON_FORMATTER_AVAILABLE:
     }
     # Optionally switch file handler to JSON formatter
     # LOGGING['handlers']['file']['formatter'] = 'json'
+
+# Validate settings on startup
+# NOTE: Validation is called at the end of local.py/production.py after all settings are finalized
+# from config.settings.validator import validate_settings_on_startup
+# validate_settings_on_startup()

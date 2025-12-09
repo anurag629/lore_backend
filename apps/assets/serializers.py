@@ -33,6 +33,7 @@ class IPAssetListSerializer(serializers.ModelSerializer):
     id = serializers.UUIDField(source='uuid', read_only=True)
     creator = CreatorSerializer(read_only=True)
     derivative_count = serializers.SerializerMethodField()
+    parent_asset_id = serializers.SerializerMethodField()
     is_deleted = serializers.BooleanField(read_only=True)
     deleted_at = serializers.DateTimeField(read_only=True, allow_null=True)
     minting_fee = serializers.DecimalField(max_digits=10, decimal_places=6, read_only=True)
@@ -47,6 +48,7 @@ class IPAssetListSerializer(serializers.ModelSerializer):
             'description',
             'media_url',
             'is_derivative',
+            'parent_asset_id',
             'derivative_count',
             'allow_derivatives',
             'commercial_rights',
@@ -63,8 +65,27 @@ class IPAssetListSerializer(serializers.ModelSerializer):
         # Use annotated count if available (from queryset optimization)
         if hasattr(obj, 'derivative_count_annotated'):
             return obj.derivative_count_annotated
-        # Fallback to property
+        # Fallback to property (which now includes both legacy and M2M)
         return obj.derivative_count
+
+    def get_parent_asset_id(self, obj):
+        """Get parent asset UUID (supports both legacy FK and M2M relationships)."""
+        # Check legacy FK first (primary parent for old single-parent derivatives)
+        if obj.parent_asset_id:
+            return str(obj.parent_asset.uuid)
+
+        # Fallback to M2M - get first parent from relationships
+        # Use prefetched data if available
+        if hasattr(obj, '_prefetched_objects_cache') and 'parent_relationships' in obj._prefetched_objects_cache:
+            relationships = obj._prefetched_objects_cache['parent_relationships']
+            if relationships:
+                return str(relationships[0].parent_asset.uuid)
+        else:
+            first_rel = obj.parent_relationships.select_related('parent_asset').first()
+            if first_rel:
+                return str(first_rel.parent_asset.uuid)
+
+        return None
 
 
 class ParentAssetSerializer(serializers.ModelSerializer):
@@ -86,6 +107,7 @@ class IPAssetDetailSerializer(serializers.ModelSerializer):
     id = serializers.UUIDField(source='uuid', read_only=True)
     creator = CreatorSerializer(read_only=True)
     parent_asset = ParentAssetSerializer(read_only=True)
+    parent_asset_id = serializers.SerializerMethodField()
     parent_relationships = serializers.SerializerMethodField()
     derivative_count = serializers.IntegerField(read_only=True)
     derivatives = serializers.SerializerMethodField()
@@ -103,6 +125,7 @@ class IPAssetDetailSerializer(serializers.ModelSerializer):
             'metadata_hash',
             'is_derivative',
             'parent_asset',
+            'parent_asset_id',
             'parent_relationships',
             'royalty_percentage',
             'allow_derivatives',
@@ -122,6 +145,24 @@ class IPAssetDetailSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    def get_parent_asset_id(self, obj):
+        """Get parent asset UUID (supports both legacy FK and M2M relationships)."""
+        # Check legacy FK first
+        if obj.parent_asset_id:
+            return str(obj.parent_asset.uuid)
+
+        # Check M2M relationship - use prefetched data if available
+        if hasattr(obj, '_prefetched_objects_cache') and 'parent_relationships' in obj._prefetched_objects_cache:
+            relationships = obj._prefetched_objects_cache['parent_relationships']
+            if relationships:
+                return str(relationships[0].parent_asset.uuid)
+        else:
+            first_rel = obj.parent_relationships.select_related('parent_asset').first()
+            if first_rel:
+                return str(first_rel.parent_asset.uuid)
+
+        return None
+
     def get_parent_relationships(self, obj):
         """Get all parent relationships with attribution percentages."""
         if not obj.is_derivative:
@@ -140,13 +181,13 @@ class IPAssetDetailSerializer(serializers.ModelSerializer):
         return DerivativeRelationshipSerializer(relationships, many=True).data
 
     def get_derivatives(self, obj):
-        """Get list of derivative assets."""
-        # Use prefetched derivatives if available (optimized in view)
-        if hasattr(obj, '_prefetched_objects_cache') and 'derivatives' in obj._prefetched_objects_cache:
-            derivatives = obj._prefetched_objects_cache['derivatives']
-        else:
-            # Fallback to query if not prefetched
-            derivatives = obj.derivatives.filter(is_deleted=False).select_related('creator')[:10]
+        """Get list of derivative assets (includes both legacy FK and M2M relationships)."""
+        # Use the new method that combines both relationship types
+        derivatives = list(obj.get_all_derivatives())
+
+        # Sort by created_at descending and limit to 20
+        derivatives = sorted(derivatives, key=lambda x: x.created_at, reverse=True)[:20]
+
         return IPAssetListSerializer(derivatives, many=True).data
 
 

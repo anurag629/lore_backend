@@ -51,7 +51,16 @@ class IPAssetViewSet(viewsets.ModelViewSet):
     Handles asset creation, listing, retrieval, and Story Protocol integration.
     """
 
-    queryset = IPAsset.objects.select_related('creator', 'parent_asset').prefetch_related('derivatives').all()
+    queryset = IPAsset.objects.select_related(
+        'creator', 'parent_asset', 'parent_asset__creator'
+    ).prefetch_related(
+        'derivatives',
+        'legacy_derivatives',
+        Prefetch(
+            'parent_relationships',
+            queryset=DerivativeRelationship.objects.select_related('parent_asset', 'parent_asset__creator')
+        )
+    ).all()
     permission_classes = [IsAuthenticatedOrReadOnly]
     throttle_classes = [UploadRateThrottle]
     throttle_scope = 'upload'
@@ -127,11 +136,20 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                 queryset = queryset.filter(registration_status='registered')
             
             # Annotate derivative count to avoid N+1 queries
+            # Count both M2M (derivatives) and legacy FK (legacy_derivatives) relationships
             queryset = queryset.annotate(
-                derivative_count_annotated=Count(
+                _m2m_derivative_count=Count(
                     'derivatives',
-                    filter=Q(derivatives__is_deleted=False, derivatives__registration_status='registered')
+                    filter=Q(derivatives__is_deleted=False),
+                    distinct=True
+                ),
+                _legacy_derivative_count=Count(
+                    'legacy_derivatives',
+                    filter=Q(legacy_derivatives__is_deleted=False),
+                    distinct=True
                 )
+            ).annotate(
+                derivative_count_annotated=F('_m2m_derivative_count') + F('_legacy_derivative_count')
             )
         elif self.action == 'retrieve':
             # For detail view, allow viewing any asset (registered or not)
@@ -1584,10 +1602,11 @@ class IPAssetViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     def derivatives(self, request, uuid=None):
-        """Get all derivatives of an IP asset."""
+        """Get all derivatives of an IP asset (includes both legacy FK and M2M relationships)."""
         asset = self.get_object()
-        # Optimize query with select_related for creator
-        derivatives = asset.derivatives.filter(is_deleted=False).select_related('creator').order_by('-created_at')
+        # Use get_all_derivatives() which includes both legacy and M2M relationships
+        derivatives = list(asset.get_all_derivatives())
+        derivatives = sorted(derivatives, key=lambda x: x.created_at, reverse=True)
         serializer = IPAssetListSerializer(derivatives, many=True)
         return Response(serializer.data)
 

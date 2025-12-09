@@ -229,15 +229,43 @@ class IPAsset(models.Model):
 
     @property
     def derivative_count(self):
-        """Count of spin-offs/derivatives"""
+        """Count of spin-offs/derivatives (includes both legacy FK and M2M relationships)"""
         # Use cached count if available
         if hasattr(self, '_derivative_count_cache'):
             return self._derivative_count_cache
-        # Query with filter for deleted assets
-        count = self.derivatives.filter(is_deleted=False).count()
+
+        # Count from ManyToMany relationship (new multi-parent system)
+        m2m_count = self.derivatives.filter(is_deleted=False).count()
+
+        # Count from legacy FK relationship (old single-parent system)
+        # Exclude any that are already counted in M2M to avoid double-counting
+        m2m_ids = set(self.derivatives.filter(is_deleted=False).values_list('id', flat=True))
+        legacy_count = self.legacy_derivatives.filter(is_deleted=False).exclude(id__in=m2m_ids).count()
+
+        count = m2m_count + legacy_count
         # Cache for this instance
         self._derivative_count_cache = count
         return count
+
+    def get_all_derivatives(self, include_deleted=False):
+        """Get all derivatives from both legacy FK and ManyToMany relationships"""
+        base_filter = {} if include_deleted else {'is_deleted': False}
+
+        # Get IDs from M2M derivatives
+        m2m_ids = set(self.derivatives.filter(**base_filter).values_list('id', flat=True))
+
+        # Get IDs from legacy FK derivatives (excluding duplicates)
+        legacy_ids = set(
+            self.legacy_derivatives.filter(**base_filter)
+            .exclude(id__in=m2m_ids)
+            .values_list('id', flat=True)
+        )
+
+        # Combine and return queryset with proper prefetching for serialization
+        all_ids = m2m_ids | legacy_ids
+        return IPAsset.objects.filter(id__in=all_ids).select_related(
+            'creator', 'parent_asset', 'parent_asset__creator'
+        ).prefetch_related('parent_relationships__parent_asset')
 
 
 class RoyaltyPayment(models.Model):

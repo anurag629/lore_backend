@@ -1,6 +1,7 @@
 """
 Authentication utilities for SIWE (Sign-In with Ethereum)
 """
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
@@ -8,6 +9,8 @@ from typing import Dict, Optional
 from siwe import SiweMessage, VerificationError
 from eth_account.messages import encode_defunct
 from web3 import Web3
+
+logger = logging.getLogger(__name__)
 
 
 def generate_nonce() -> str:
@@ -105,7 +108,7 @@ def verify_siwe_signature(
 
         # Security check: verify the domain matches
         if siwe_message.domain != expected_domain:
-            print(f"Domain mismatch: {siwe_message.domain} != {expected_domain}")
+            logger.warning(f"Domain mismatch: {siwe_message.domain} != {expected_domain}")
             return None
 
         # Verify the signature
@@ -119,10 +122,10 @@ def verify_siwe_signature(
         }
 
     except VerificationError as e:
-        print(f"SIWE verification error: {str(e)}")
+        logger.warning(f"SIWE verification error: {str(e)}")
         return None
     except Exception as e:
-        print(f"Unexpected error during SIWE verification: {str(e)}")
+        logger.error(f"Unexpected error during SIWE verification: {str(e)}")
         return None
 
 
@@ -159,7 +162,7 @@ def verify_eth_signature_legacy(
         return recovered_address.lower() == wallet_address.lower()
 
     except Exception as e:
-        print(f"Error verifying signature: {str(e)}")
+        logger.error(f"Error verifying signature: {str(e)}")
         return False
 
 

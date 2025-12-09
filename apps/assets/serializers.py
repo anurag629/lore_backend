@@ -291,16 +291,17 @@ class DerivativeCreateSerializer(serializers.ModelSerializer):
         Create derivative asset and register it on Story Protocol.
         This method will be called from the view after blockchain registration.
         """
-        parent_asset_id = validated_data.pop('parent_asset_id')
+        validated_data.pop('parent_asset_id')  # Remove UUID, we'll use parent object
         validated_data.pop('media_file', None)
 
         # Set derivative-specific fields
         validated_data['is_derivative'] = True
-        validated_data['parent_asset_id'] = parent_asset_id
 
-        # Inherit parent's royalty settings
+        # Use parent object from context (set during validation)
+        # This sets the ForeignKey correctly using the model instance
         parent = self.context.get('parent_asset')
         if parent:
+            validated_data['parent_asset'] = parent  # Set FK to parent object, not UUID
             validated_data['royalty_percentage'] = parent.royalty_percentage
 
         return super().create(validated_data)

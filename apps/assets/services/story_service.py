@@ -765,10 +765,10 @@ class StoryProtocolService:
             if not license_terms_id:
                 raise RuntimeError("register_derivative requires license_terms_id (SDK >=0.1).")
 
-            result = self.client.IPAsset.registerDerivative(
-                childIpId=child_ip_id,
-                parentIpIds=parent_ip_ids,
-                licenseTermsId=license_terms_id,
+            result = self.client.IPAsset.register_derivative(
+                child_ip_id=child_ip_id,
+                parent_ip_ids=parent_ip_ids,
+                license_terms_ids=[license_terms_id] if isinstance(license_terms_id, (int, str)) else license_terms_id,
             )
 
             tx_hash = result.get('txHash')

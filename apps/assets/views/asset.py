@@ -13,6 +13,7 @@ from django.shortcuts import get_object_or_404
 from django.db import transaction
 from django.db.models import F, Count, Q, Prefetch
 from django.utils import timezone
+from django.core.cache import cache
 from apps.core.utils import normalize_wallet_address
 
 from ..models import IPAsset, RoyaltyPayment, DerivativeRelationship
@@ -1233,16 +1234,21 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                 )
 
             # Step 4: Register derivative relationship (outside transaction)
-            try:
-                story_service.register_derivative(
-                    child_ip_id=child_ip_id,
-                    parent_ip_ids=[parent_asset.story_ip_id],
-                    license_terms_id=child_license_terms_id
-                )
-                logger.info("Derivative relationship registered")
-            except Exception as e:
-                logger.error(f"Failed to register derivative relationship: {str(e)}")
-                # Continue - asset is already registered, relationship can be added later
+            # SDK requires PARENT's license_terms_id, not child's
+            parent_license_terms_id = parent_asset.step_data.get('story_registration', {}).get('license_terms_id')
+            if not parent_license_terms_id:
+                logger.warning("Parent asset has no license_terms_id in step_data, skipping derivative relationship")
+            else:
+                try:
+                    story_service.register_derivative(
+                        child_ip_id=child_ip_id,
+                        parent_ip_ids=[parent_asset.story_ip_id],
+                        license_terms_id=parent_license_terms_id
+                    )
+                    logger.info("Derivative relationship registered")
+                except Exception as e:
+                    logger.error(f"Failed to register derivative relationship: {str(e)}")
+                    # Continue - asset is already registered, relationship can be added later
 
             # Step 5: Save to database LAST (in small transaction)
             with transaction.atomic():
@@ -1255,7 +1261,12 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                 # Persist license_terms_id for downstream processes/attachments
                 derivative.step_data = derivative.step_data or {}
                 derivative.step_data.setdefault('story_registration', {})['license_terms_id'] = child_license_terms_id
-                derivative.save(update_fields=['step_data'])
+                # Mark derivative as successfully registered
+                derivative.creation_step = 'completed'
+                derivative.registration_status = 'registered'
+                derivative.registration_error = ''
+                derivative.failed_at_step = None
+                derivative.save(update_fields=['step_data', 'creation_step', 'registration_status', 'registration_error', 'failed_at_step'])
 
             # Invalidate cache
             invalidate_asset_cache()
@@ -1450,9 +1461,14 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                 logger.info(f"Created {len(relationships)} parent relationships")
 
                 # Also set the legacy parent_asset field to the first parent for backward compatibility
+                # And mark derivative as successfully registered
                 if validated_parents:
                     derivative.parent_asset = validated_parents[0]['parent_asset']
-                    derivative.save(update_fields=['parent_asset'])
+                derivative.creation_step = 'completed'
+                derivative.registration_status = 'registered'
+                derivative.registration_error = ''
+                derivative.failed_at_step = None
+                derivative.save(update_fields=['parent_asset', 'creation_step', 'registration_status', 'registration_error', 'failed_at_step'])
 
             # Invalidate cache
             invalidate_asset_cache()

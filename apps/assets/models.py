@@ -271,7 +271,7 @@ class RoyaltyPayment(models.Model):
         help_text="Blockchain transaction hash"
     )
 
-    block_number = models.IntegerField(
+    block_number = models.BigIntegerField(
         help_text="Block number where payment occurred"
     )
 
@@ -507,7 +507,7 @@ class GroupRoyaltyDistribution(models.Model):
         help_text="Blockchain transaction hash"
     )
 
-    block_number = models.IntegerField(
+    block_number = models.BigIntegerField(
         help_text="Block number where distribution occurred"
     )
 

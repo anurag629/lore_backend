@@ -16,7 +16,9 @@ from django.utils import timezone
 from django.core.cache import cache
 from apps.core.utils import normalize_wallet_address
 
-from ..models import IPAsset, RoyaltyPayment, DerivativeRelationship
+from decimal import Decimal
+from django.db.models import Sum
+from ..models import IPAsset, RoyaltyPayment, DerivativeRelationship, MintingFeePayment
 from ..serializers import (
     IPAssetListSerializer,
     IPAssetDetailSerializer,
@@ -1251,6 +1253,10 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                     # Continue - asset is already registered, relationship can be added later
 
             # Step 5: Save to database LAST (in small transaction)
+            # Calculate minting fee for this derivative
+            from ..services.fee_service import fee_service
+            fee_info = fee_service.calculate_single_parent_fee(parent_asset)
+
             with transaction.atomic():
                 derivative = serializer.save(
                     creator=request.user,
@@ -1268,15 +1274,45 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                 derivative.failed_at_step = None
                 derivative.save(update_fields=['step_data', 'creation_step', 'registration_status', 'registration_error', 'failed_at_step'])
 
+                # Record minting fee payment (if fee > 0)
+                if not fee_info['is_free']:
+                    breakdown = fee_info['breakdown'][0]
+                    MintingFeePayment.objects.create(
+                        payer=request.user,
+                        derivative_asset=derivative,
+                        parent_asset=parent_asset,
+                        fee_amount=Decimal(str(fee_info['total_fee'])),
+                        fee_amount_wei=fee_info['total_fee_wei'],
+                        attribution_percentage=Decimal('100'),
+                        platform_fee=Decimal(str(fee_info['platform_fee'])),
+                        creator_fee=Decimal(str(fee_info['creator_fee'])),
+                        transaction_hash=registration_result.get('transaction_hash', ''),
+                        block_number=registration_result.get('block_number'),
+                        status='paid',
+                        paid_at=timezone.now(),
+                    )
+
+                    # Update derivative relationship with fee paid
+                    derivative.parent_relationships.filter(parent_asset=parent_asset).update(
+                        fee_paid=Decimal(str(breakdown['fee_share']))
+                    )
+
+                    logger.info(
+                        f"Recorded minting fee: {fee_info['total_fee']} ETH for derivative {derivative.uuid}"
+                    )
+
             # Invalidate cache
             invalidate_asset_cache()
             if parent_asset:
                 invalidate_asset_cache(parent_asset.id)
 
-            # Transaction completed successfully
+            # Transaction completed successfully - include fee info in response
             response_serializer = IPAssetDetailSerializer(derivative)
+            response_data = response_serializer.data
+            response_data['fee_info'] = fee_info
+
             return Response(
-                response_serializer.data,
+                response_data,
                 status=status.HTTP_201_CREATED
             )
 
@@ -1435,6 +1471,17 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                 # Continue - asset is already registered, relationships can be added later
 
             # Step 5: Save to database LAST (in transaction)
+            # Calculate minting fee for multi-parent derivative
+            from ..services.fee_service import fee_service
+            fee_parents = [
+                {
+                    'parent_asset': p['parent_asset'],
+                    'attribution_percentage': Decimal(str(p['attribution_percentage']))
+                }
+                for p in validated_parents
+            ]
+            fee_info = fee_service.calculate_derivative_fee(fee_parents)
+
             with transaction.atomic():
                 # Create the derivative asset
                 derivative = serializer.save(
@@ -1447,18 +1494,58 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                 # Create DerivativeRelationship records for each parent
                 relationships = []
                 for parent_data in validated_parents:
+                    # Find fee share for this parent from breakdown
+                    fee_share = Decimal('0')
+                    for breakdown_item in fee_info['breakdown']:
+                        if breakdown_item['parent_asset_id'] == str(parent_data['parent_asset'].uuid):
+                            fee_share = Decimal(str(breakdown_item['fee_share']))
+                            break
+
                     relationship = DerivativeRelationship(
                         child_asset=derivative,
                         parent_asset=parent_data['parent_asset'],
                         attribution_percentage=parent_data['attribution_percentage'],
                         license_terms_id=parent_data.get('license_terms_id', ''),
-                        transaction_hash=''  # Can be updated later if needed
+                        transaction_hash='',  # Can be updated later if needed
+                        fee_paid=fee_share
                     )
                     relationships.append(relationship)
 
                 # Bulk create all relationships
                 DerivativeRelationship.objects.bulk_create(relationships)
                 logger.info(f"Created {len(relationships)} parent relationships")
+
+                # Record minting fee payments for each parent (if fee > 0)
+                if not fee_info['is_free']:
+                    for breakdown_item in fee_info['breakdown']:
+                        # Find the parent asset from validated_parents
+                        parent_asset = None
+                        attribution_pct = Decimal('0')
+                        for p in validated_parents:
+                            if str(p['parent_asset'].uuid) == breakdown_item['parent_asset_id']:
+                                parent_asset = p['parent_asset']
+                                attribution_pct = Decimal(str(p['attribution_percentage']))
+                                break
+
+                        if parent_asset and Decimal(str(breakdown_item['fee_share'])) > 0:
+                            MintingFeePayment.objects.create(
+                                payer=request.user,
+                                derivative_asset=derivative,
+                                parent_asset=parent_asset,
+                                fee_amount=Decimal(str(breakdown_item['fee_before_split'])),
+                                fee_amount_wei=breakdown_item['fee_share_wei'],
+                                attribution_percentage=attribution_pct,
+                                platform_fee=Decimal(str(breakdown_item['fee_before_split'])) * Decimal('0.05'),
+                                creator_fee=Decimal(str(breakdown_item['fee_share'])),
+                                transaction_hash=registration_result.get('transaction_hash', ''),
+                                block_number=registration_result.get('block_number'),
+                                status='paid',
+                                paid_at=timezone.now(),
+                            )
+
+                    logger.info(
+                        f"Recorded minting fees: {fee_info['total_fee']} ETH for multi-parent derivative {derivative.uuid}"
+                    )
 
                 # Also set the legacy parent_asset field to the first parent for backward compatibility
                 # And mark derivative as successfully registered
@@ -1475,10 +1562,13 @@ class IPAssetViewSet(viewsets.ModelViewSet):
             for parent_data in validated_parents:
                 invalidate_asset_cache(parent_data['parent_asset'].id)
 
-            # Transaction completed successfully
+            # Transaction completed successfully - include fee info in response
             response_serializer = IPAssetDetailSerializer(derivative)
+            response_data = response_serializer.data
+            response_data['fee_info'] = fee_info
+
             return Response(
-                response_serializer.data,
+                response_data,
                 status=status.HTTP_201_CREATED
             )
 
@@ -1611,3 +1701,322 @@ class IPAssetViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_200_OK  # Return 200 with error message instead of 500
             )
 
+    # ============================================================================
+    # MINTING FEE ENDPOINTS
+    # ============================================================================
+
+    @action(detail=False, methods=['post'], permission_classes=[IsAuthenticated])
+    def calculate_derivative_fee(self, request):
+        """
+        Calculate fee before derivative creation.
+
+        POST /api/assets/calculate_derivative_fee/
+        Body: {
+            "parents": [
+                {"parent_asset_id": "uuid", "attribution_percentage": 100}
+            ]
+        }
+
+        Returns fee breakdown with total, platform fee, and per-parent shares.
+        """
+        from ..services.fee_service import fee_service
+
+        parents_data = request.data.get('parents', [])
+        if not parents_data:
+            return Response(
+                {'error': 'At least one parent required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Validate and fetch parents
+        parents = []
+        total_attribution = Decimal('0')
+
+        for p in parents_data:
+            parent_id = p.get('parent_asset_id')
+            if not parent_id:
+                return Response(
+                    {'error': 'parent_asset_id is required for each parent'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            try:
+                parent = IPAsset.objects.select_related('creator').get(
+                    uuid=parent_id,
+                    is_deleted=False
+                )
+            except IPAsset.DoesNotExist:
+                return Response(
+                    {'error': f"Parent asset {parent_id} not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            attribution = Decimal(str(p.get('attribution_percentage', 100)))
+            if attribution < 0 or attribution > 100:
+                return Response(
+                    {'error': f'Attribution percentage must be between 0 and 100'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            total_attribution += attribution
+            parents.append({
+                'parent_asset': parent,
+                'attribution_percentage': attribution
+            })
+
+        # Validate total attribution
+        if abs(total_attribution - Decimal('100')) > Decimal('0.01'):
+            return Response(
+                {'error': f'Attribution percentages must sum to 100%, got {total_attribution}%'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            fee_info = fee_service.calculate_derivative_fee(parents)
+            return Response(fee_info)
+        except ValueError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            logger.error(f"Fee calculation error: {str(e)}")
+            return Response(
+                {'error': 'Failed to calculate fee'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated])
+    def minting_fee_balance(self, request, pk=None):
+        """
+        Get unclaimed minting fees for an asset.
+
+        GET /api/assets/{id}/minting_fee_balance/
+
+        Returns unclaimed fee amount and count for the asset.
+        Only accessible by the asset creator.
+        """
+        asset = self.get_object()
+
+        # Only creator can view fee balance
+        if asset.creator != request.user:
+            return Response(
+                {'error': 'Not authorized to view fee balance for this asset'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        unclaimed = MintingFeePayment.objects.filter(
+            parent_asset=asset,
+            status='paid'
+        ).aggregate(
+            total=Sum('creator_fee'),
+            count=Count('id')
+        )
+
+        return Response({
+            'asset_id': str(asset.uuid),
+            'asset_title': asset.title,
+            'unclaimed_amount': float(unclaimed['total'] or 0),
+            'unclaimed_count': unclaimed['count'] or 0,
+            'minting_fee_setting': float(asset.minting_fee),
+        })
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def claim_minting_fees(self, request, pk=None):
+        """
+        Claim accumulated minting fees for an asset.
+
+        POST /api/assets/{id}/claim_minting_fees/
+
+        Marks all unclaimed fees as claimed and updates user's total earnings.
+        Only accessible by the asset creator.
+        """
+        asset = self.get_object()
+
+        # Only creator can claim fees
+        if asset.creator != request.user:
+            return Response(
+                {'error': 'Not authorized to claim fees for this asset'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        with transaction.atomic():
+            # Get unclaimed fees
+            unclaimed = MintingFeePayment.objects.filter(
+                parent_asset=asset,
+                status='paid'
+            ).select_for_update()
+
+            if not unclaimed.exists():
+                return Response(
+                    {'error': 'No fees to claim'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Calculate total
+            total = unclaimed.aggregate(total=Sum('creator_fee'))['total'] or Decimal('0')
+            claim_count = unclaimed.count()
+
+            # Mark as claimed
+            unclaimed.update(
+                status='claimed',
+                claimed_at=timezone.now()
+            )
+
+            # Update user earnings
+            request.user.total_earnings = F('total_earnings') + total
+            request.user.save(update_fields=['total_earnings'])
+            request.user.refresh_from_db(fields=['total_earnings'])
+
+            logger.info(
+                f"User {request.user.id} claimed {total} ETH in minting fees "
+                f"from asset {asset.uuid} ({claim_count} payments)"
+            )
+
+        return Response({
+            'claimed_amount': float(total),
+            'claimed_count': claim_count,
+            'asset_id': str(asset.uuid),
+            'new_total_earnings': float(request.user.total_earnings),
+        })
+
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
+    def my_fee_stats(self, request):
+        """
+        Get comprehensive fee statistics for the current user.
+
+        GET /api/assets/my_fee_stats/
+
+        Returns total earned, unclaimed, claimed amounts, and per-asset breakdown.
+        """
+        user = request.user
+
+        # Get all assets owned by user
+        user_assets = IPAsset.objects.filter(
+            creator=user,
+            is_deleted=False
+        )
+
+        # Aggregate overall fees
+        stats = MintingFeePayment.objects.filter(
+            parent_asset__creator=user
+        ).aggregate(
+            total_earned=Sum('creator_fee'),
+            total_unclaimed=Sum('creator_fee', filter=Q(status='paid')),
+            total_claimed=Sum('creator_fee', filter=Q(status='claimed')),
+            payment_count=Count('id'),
+        )
+
+        # Also get fees paid by user (as derivative creator)
+        fees_paid = MintingFeePayment.objects.filter(
+            payer=user
+        ).aggregate(
+            total_paid=Sum('fee_amount'),
+            paid_count=Count('id'),
+        )
+
+        # Per-asset breakdown for assets with fees
+        assets_with_fees = []
+        for asset in user_assets:
+            fees = MintingFeePayment.objects.filter(parent_asset=asset)
+            unclaimed_amount = fees.filter(status='paid').aggregate(
+                Sum('creator_fee')
+            )['creator_fee__sum'] or Decimal('0')
+            total_earned = fees.aggregate(
+                Sum('creator_fee')
+            )['creator_fee__sum'] or Decimal('0')
+
+            # Only include assets that have some fee activity or minting_fee > 0
+            if total_earned > 0 or unclaimed_amount > 0 or asset.minting_fee > 0:
+                assets_with_fees.append({
+                    'id': str(asset.uuid),
+                    'title': asset.title,
+                    'thumbnail': asset.thumbnail_url or asset.media_url,
+                    'minting_fee': float(asset.minting_fee),
+                    'derivative_count': asset.derivatives.filter(is_deleted=False).count(),
+                    'unclaimed_amount': float(unclaimed_amount),
+                    'total_earned': float(total_earned),
+                    'fee_payment_count': fees.count(),
+                })
+
+        # Sort by unclaimed amount (highest first)
+        assets_with_fees.sort(key=lambda x: x['unclaimed_amount'], reverse=True)
+
+        return Response({
+            'total_earned': float(stats['total_earned'] or 0),
+            'total_unclaimed': float(stats['total_unclaimed'] or 0),
+            'total_claimed': float(stats['total_claimed'] or 0),
+            'payment_count': stats['payment_count'] or 0,
+            'fees_paid_as_creator': float(fees_paid['total_paid'] or 0),
+            'fees_paid_count': fees_paid['paid_count'] or 0,
+            'assets_with_fees': assets_with_fees,
+        })
+
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
+    def my_fee_payments(self, request):
+        """
+        Get paginated list of fee payments involving the current user.
+
+        GET /api/assets/my_fee_payments/
+        Query params:
+            - type: 'received' | 'paid' | 'all' (default: 'all')
+            - status: 'pending' | 'paid' | 'claimed' | 'all' (default: 'all')
+            - page: page number
+
+        Returns paginated list of fee payment records.
+        """
+        user = request.user
+        payment_type = request.query_params.get('type', 'all')
+        payment_status = request.query_params.get('status', 'all')
+
+        # Base queryset
+        if payment_type == 'received':
+            queryset = MintingFeePayment.objects.filter(parent_asset__creator=user)
+        elif payment_type == 'paid':
+            queryset = MintingFeePayment.objects.filter(payer=user)
+        else:
+            queryset = MintingFeePayment.objects.filter(
+                Q(parent_asset__creator=user) | Q(payer=user)
+            )
+
+        # Filter by status
+        if payment_status != 'all':
+            queryset = queryset.filter(status=payment_status)
+
+        # Order and select related
+        queryset = queryset.select_related(
+            'payer', 'derivative_asset', 'parent_asset', 'parent_asset__creator'
+        ).order_by('-created_at')
+
+        # Paginate
+        page = self.paginate_queryset(queryset)
+
+        # Serialize
+        payments = []
+        for payment in (page or queryset[:50]):
+            payments.append({
+                'uuid': str(payment.uuid),
+                'payer_username': payment.payer.display_name,
+                'payer_id': payment.payer.id,
+                'derivative_title': payment.derivative_asset.title,
+                'derivative_id': str(payment.derivative_asset.uuid),
+                'parent_title': payment.parent_asset.title,
+                'parent_id': str(payment.parent_asset.uuid),
+                'parent_creator': payment.parent_asset.creator.display_name,
+                'fee_amount': float(payment.fee_amount),
+                'platform_fee': float(payment.platform_fee),
+                'creator_fee': float(payment.creator_fee),
+                'attribution_percentage': float(payment.attribution_percentage),
+                'transaction_hash': payment.transaction_hash,
+                'block_number': payment.block_number,
+                'status': payment.status,
+                'created_at': payment.created_at.isoformat(),
+                'paid_at': payment.paid_at.isoformat() if payment.paid_at else None,
+                'claimed_at': payment.claimed_at.isoformat() if payment.claimed_at else None,
+                'is_received': payment.parent_asset.creator == user,
+            })
+
+        if page is not None:
+            return self.get_paginated_response(payments)
+
+        return Response(payments)

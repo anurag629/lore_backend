@@ -5,7 +5,7 @@ from rest_framework import serializers
 from django.core.exceptions import ValidationError
 from .models import (
     IPAsset, RoyaltyPayment, GroupIP, GroupIPMembership, GroupRoyaltyDistribution,
-    Dispute, DisputeEvidence, DerivativeRelationship, IPAccountPermission
+    Dispute, DisputeEvidence, DerivativeRelationship, IPAccountPermission, MintingFeePayment
 )
 from apps.core.models import LoreUser
 from .validators import (
@@ -35,6 +35,7 @@ class IPAssetListSerializer(serializers.ModelSerializer):
     derivative_count = serializers.SerializerMethodField()
     is_deleted = serializers.BooleanField(read_only=True)
     deleted_at = serializers.DateTimeField(read_only=True, allow_null=True)
+    minting_fee = serializers.DecimalField(max_digits=10, decimal_places=6, read_only=True)
 
     class Meta:
         model = IPAsset
@@ -49,6 +50,7 @@ class IPAssetListSerializer(serializers.ModelSerializer):
             'derivative_count',
             'allow_derivatives',
             'commercial_rights',
+            'minting_fee',
             'registration_status',
             'is_deleted',
             'deleted_at',
@@ -70,10 +72,11 @@ class ParentAssetSerializer(serializers.ModelSerializer):
 
     id = serializers.UUIDField(source='uuid', read_only=True)
     creator = CreatorSerializer(read_only=True)
+    minting_fee = serializers.DecimalField(max_digits=10, decimal_places=6, read_only=True)
 
     class Meta:
         model = IPAsset
-        fields = ['id', 'story_ip_id', 'title', 'creator', 'media_url']
+        fields = ['id', 'story_ip_id', 'title', 'creator', 'media_url', 'minting_fee']
         read_only_fields = fields
 
 
@@ -86,6 +89,7 @@ class IPAssetDetailSerializer(serializers.ModelSerializer):
     parent_relationships = serializers.SerializerMethodField()
     derivative_count = serializers.IntegerField(read_only=True)
     derivatives = serializers.SerializerMethodField()
+    minting_fee = serializers.DecimalField(max_digits=10, decimal_places=6, read_only=True)
 
     class Meta:
         model = IPAsset
@@ -103,6 +107,7 @@ class IPAssetDetailSerializer(serializers.ModelSerializer):
             'royalty_percentage',
             'allow_derivatives',
             'commercial_rights',
+            'minting_fee',
             'derivative_count',
             'derivatives',
             'registration_status',
@@ -154,6 +159,12 @@ class IPAssetCreateSerializer(serializers.ModelSerializer):
         required=False,
         validators=[validate_file_size, validate_file_type, validate_file_name]
     )
+    minting_fee = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=6,
+        required=False,
+        help_text="Minting fee in ETH for derivative creation (set by creator)"
+    )
 
     class Meta:
         model = IPAsset
@@ -165,6 +176,7 @@ class IPAssetCreateSerializer(serializers.ModelSerializer):
             'royalty_percentage',
             'allow_derivatives',
             'commercial_rights',
+            'minting_fee',
         ]
         extra_kwargs = {
             'media_url': {'required': False},  # Can be provided or uploaded
@@ -175,6 +187,21 @@ class IPAssetCreateSerializer(serializers.ModelSerializer):
         if not (0 <= value <= 100):
             raise serializers.ValidationError(
                 "Royalty percentage must be between 0 and 100"
+            )
+        return value
+
+    def validate_minting_fee(self, value):
+        """Validate minting fee is non-negative and within reasonable bounds."""
+        from decimal import Decimal
+        if value is None:
+            return Decimal('0.005')  # Default minting fee
+        if value < 0:
+            raise serializers.ValidationError(
+                "Minting fee cannot be negative"
+            )
+        if value > Decimal('0.5'):
+            raise serializers.ValidationError(
+                "Minting fee cannot exceed 0.5 ETH"
             )
         return value
 
@@ -313,6 +340,7 @@ class DerivativeRelationshipSerializer(serializers.ModelSerializer):
     id = serializers.UUIDField(source='uuid', read_only=True)
     parent_asset = ParentAssetSerializer(read_only=True)
     parent_asset_id = serializers.UUIDField(write_only=True, required=False)
+    fee_paid = serializers.DecimalField(max_digits=10, decimal_places=6, read_only=True)
 
     class Meta:
         model = DerivativeRelationship
@@ -322,10 +350,11 @@ class DerivativeRelationshipSerializer(serializers.ModelSerializer):
             'parent_asset_id',
             'attribution_percentage',
             'license_terms_id',
+            'fee_paid',
             'transaction_hash',
             'created_at',
         ]
-        read_only_fields = ['id', 'parent_asset', 'transaction_hash', 'created_at']
+        read_only_fields = ['id', 'parent_asset', 'fee_paid', 'transaction_hash', 'created_at']
 
     def validate_attribution_percentage(self, value):
         """Validate attribution percentage is between 0 and 100."""
@@ -334,6 +363,46 @@ class DerivativeRelationshipSerializer(serializers.ModelSerializer):
                 "Attribution percentage must be between 0 and 100"
             )
         return value
+
+
+class MintingFeePaymentSerializer(serializers.ModelSerializer):
+    """Serializer for minting fee payment records."""
+
+    id = serializers.UUIDField(source='uuid', read_only=True)
+    payer_username = serializers.CharField(source='payer.display_name', read_only=True)
+    payer_id = serializers.IntegerField(source='payer.id', read_only=True)
+    derivative_title = serializers.CharField(source='derivative_asset.title', read_only=True)
+    derivative_id = serializers.UUIDField(source='derivative_asset.uuid', read_only=True)
+    parent_title = serializers.CharField(source='parent_asset.title', read_only=True)
+    parent_id = serializers.UUIDField(source='parent_asset.uuid', read_only=True)
+    parent_creator = serializers.CharField(source='parent_asset.creator.display_name', read_only=True)
+    parent_creator_id = serializers.IntegerField(source='parent_asset.creator.id', read_only=True)
+
+    class Meta:
+        model = MintingFeePayment
+        fields = [
+            'id',
+            'payer_username',
+            'payer_id',
+            'derivative_title',
+            'derivative_id',
+            'parent_title',
+            'parent_id',
+            'parent_creator',
+            'parent_creator_id',
+            'fee_amount',
+            'fee_amount_wei',
+            'platform_fee',
+            'creator_fee',
+            'attribution_percentage',
+            'transaction_hash',
+            'block_number',
+            'status',
+            'created_at',
+            'paid_at',
+            'claimed_at',
+        ]
+        read_only_fields = fields
 
 
 class MultiParentDerivativeCreateSerializer(serializers.ModelSerializer):

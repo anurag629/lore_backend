@@ -196,7 +196,8 @@ class StoryProtocolService:
         creator_address: str,
         allow_derivatives: bool = True,
         commercial_use: bool = False,
-        royalty_percentage: int = 0
+        royalty_percentage: int = 0,
+        minting_fee: float = 0.0
     ) -> Dict[str, Any]:
         """
         Register a new IP asset on Story Protocol.
@@ -208,6 +209,7 @@ class StoryProtocolService:
             allow_derivatives: Whether derivatives are allowed (default: True)
             commercial_use: Whether commercial use is allowed (default: False)
             royalty_percentage: Royalty percentage 0-100 (default: 0)
+            minting_fee: Minting fee in ETH for derivative creation (default: 0.0)
 
         Returns:
             Dict containing:
@@ -423,6 +425,10 @@ class StoryProtocolService:
                 if not currency:
                     currency = "0x1514000000000000000000000000000000000000"  # $WIP default
                 
+                # Convert minting_fee from ETH to Wei
+                minting_fee_wei = int(float(minting_fee) * 1e18) if minting_fee else 0
+                logger.info(f"Minting fee: {minting_fee} ETH = {minting_fee_wei} Wei")
+
                 # Determine which PIL flavor to use based on settings
                 # Use simplified terms structure - let SDK handle defaults
                 if commercial_use and allow_derivatives:
@@ -430,7 +436,7 @@ class StoryProtocolService:
                     pil_terms_data = {
                         "transferable": True,
                         "royalty_policy": royalty_policy,
-                        "default_minting_fee": 0,
+                        "default_minting_fee": minting_fee_wei,
                         "expiration": 0,
                         "commercial_use": True,
                         "commercial_attribution": True,
@@ -453,7 +459,7 @@ class StoryProtocolService:
                     pil_terms_data = {
                         "transferable": True,
                         "royalty_policy": "0x0000000000000000000000000000000000000000",  # MUST be zero for non-commercial
-                        "default_minting_fee": 0,
+                        "default_minting_fee": minting_fee_wei,  # Still charge minting fee even for non-commercial
                         "expiration": 0,
                         "commercial_use": False,
                         "commercial_attribution": False,  # Must be False when commercial_use is False
@@ -472,10 +478,11 @@ class StoryProtocolService:
                 else:
                     # Commercial Use Only License (no derivatives) OR Non-commercial, no derivatives
                     # SDK REQUIREMENT: royalty_policy must be ZERO_ADDRESS if commercial_use=False
+                    # No minting fee since derivatives are not allowed
                     pil_terms_data = {
                         "transferable": True,
                         "royalty_policy": royalty_policy if commercial_use else "0x0000000000000000000000000000000000000000",
-                        "default_minting_fee": 0,
+                        "default_minting_fee": 0,  # No fee since no derivatives allowed
                         "expiration": 0,
                         "commercial_use": commercial_use,
                         "commercial_attribution": commercial_use,  # Only True if commercial_use is True
@@ -494,9 +501,10 @@ class StoryProtocolService:
                     
                 # Licensing config is REQUIRED by SDK (not optional)
                 # SDK's _validate_license_terms_data expects licensing_config to be present
+                # Set minting_fee in licensing_config to match PIL terms
                 licensing_config = {
-                    "is_set": False,
-                    "minting_fee": 0,
+                    "is_set": True if minting_fee_wei > 0 else False,
+                    "minting_fee": minting_fee_wei,
                     "licensing_hook": "0x0000000000000000000000000000000000000000",
                     "hook_data": "0x0000000000000000000000000000000000000000",
                     "commercial_rev_share": 0,  # Set to 0 per SDK docs

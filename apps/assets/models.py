@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 from django.db import models
 from django.conf import settings
 
@@ -131,6 +132,13 @@ class IPAsset(models.Model):
     commercial_rights = models.BooleanField(
         default=False,
         help_text="Allow commercial use"
+    )
+
+    minting_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=6,
+        default=Decimal('0.005'),
+        help_text="Minting fee in ETH for derivative creation (set by creator)"
     )
 
     is_deleted = models.BooleanField(
@@ -284,6 +292,131 @@ class RoyaltyPayment(models.Model):
 
     def __str__(self):
         return f"{self.amount} ETH to {self.recipient.display_name}"
+
+
+class MintingFeePayment(models.Model):
+    """
+    Tracks minting fee payments for derivative creation.
+    Records fees paid by derivative creators to parent asset owners.
+    """
+    FEE_STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('paid', 'Paid'),
+        ('claimed', 'Claimed'),
+        ('failed', 'Failed'),
+    ]
+
+    uuid = models.UUIDField(
+        default=uuid.uuid4,
+        editable=False,
+        unique=True,
+        db_index=True,
+        help_text="Public UUID for API access"
+    )
+
+    # Payer (derivative creator)
+    payer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='minting_fees_paid',
+        help_text="User who paid the minting fee"
+    )
+
+    # Derivative asset created
+    derivative_asset = models.ForeignKey(
+        IPAsset,
+        on_delete=models.PROTECT,
+        related_name='minting_fee_payments',
+        help_text="Derivative asset that was created"
+    )
+
+    # Parent asset (fee recipient's asset)
+    parent_asset = models.ForeignKey(
+        IPAsset,
+        on_delete=models.PROTECT,
+        related_name='minting_fees_received',
+        help_text="Parent asset whose creator receives the fee"
+    )
+
+    # Fee details
+    fee_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=6,
+        help_text="Fee amount in ETH"
+    )
+    fee_amount_wei = models.CharField(
+        max_length=78,
+        help_text="Fee amount in Wei (as string for precision)"
+    )
+    attribution_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        help_text="Attribution percentage for this parent (0-100)"
+    )
+
+    # Platform fee tracking
+    platform_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=6,
+        default=Decimal('0'),
+        help_text="Platform fee portion (5% of total)"
+    )
+    creator_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=6,
+        default=Decimal('0'),
+        help_text="Creator fee portion (95% of total)"
+    )
+
+    # Blockchain tracking
+    transaction_hash = models.CharField(
+        max_length=66,
+        blank=True,
+        null=True,
+        db_index=True,
+        help_text="Blockchain transaction hash"
+    )
+    block_number = models.BigIntegerField(
+        null=True,
+        blank=True,
+        help_text="Block number where payment occurred"
+    )
+
+    # Status
+    status = models.CharField(
+        max_length=20,
+        choices=FEE_STATUS_CHOICES,
+        default='pending',
+        db_index=True,
+        help_text="Payment status"
+    )
+
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    paid_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the fee was paid"
+    )
+    claimed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the fee was claimed by parent creator"
+    )
+
+    class Meta:
+        verbose_name = "Minting Fee Payment"
+        verbose_name_plural = "Minting Fee Payments"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['payer', 'status']),
+            models.Index(fields=['parent_asset', 'status']),
+            models.Index(fields=['derivative_asset']),
+            models.Index(fields=['status', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.fee_amount} ETH from {self.payer.display_name} for {self.derivative_asset.title}"
 
 
 class GroupIP(models.Model):
@@ -788,6 +921,13 @@ class DerivativeRelationship(models.Model):
         blank=True,
         null=True,
         help_text="Blockchain transaction hash for this relationship"
+    )
+
+    fee_paid = models.DecimalField(
+        max_digits=10,
+        decimal_places=6,
+        default=Decimal('0'),
+        help_text="Minting fee paid for this parent relationship in ETH"
     )
 
     created_at = models.DateTimeField(auto_now_add=True)

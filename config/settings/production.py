@@ -9,7 +9,27 @@ import os
 DEBUG = False
 
 # Azure App Service will set these
-ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=['*.azurewebsites.net', 'lore-backend.azurewebsites.net'])
+# Include Azure internal health check IPs (169.254.x.x range)
+ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=[
+    '*.azurewebsites.net',
+    'lore-backend.azurewebsites.net',
+    '169.254.130.3',  # Azure internal health check
+    '.localhost',
+    '127.0.0.1',
+])
+
+# Allow all Azure internal IPs for health checks (169.254.x.x range)
+# This is safe because these are link-local addresses only accessible within Azure
+import re
+class AzureHealthCheckAllowedHosts(list):
+    """Custom list that allows Azure health check IPs"""
+    def __contains__(self, host):
+        # Allow Azure internal health check IPs
+        if host and re.match(r'^169\.254\.\d+\.\d+$', host.split(':')[0]):
+            return True
+        return super().__contains__(host)
+
+ALLOWED_HOSTS = AzureHealthCheckAllowedHosts(ALLOWED_HOSTS)
 
 # Database - Using Azure PostgreSQL
 # Azure provides AZURE_POSTGRESQL_CONNECTIONSTRING, convert to DATABASE_URL format if needed

@@ -8,7 +8,8 @@ from celery import Celery
 logger = logging.getLogger(__name__)
 
 # Set the default Django settings module for the 'celery' program.
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
+# Use production settings by default (can be overridden by environment variable)
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings.production')
 
 app = Celery('lore')
 

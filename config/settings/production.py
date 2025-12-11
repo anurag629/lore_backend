@@ -64,17 +64,7 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 # Pinata credentials are already loaded from base.py:
 # - PINATA_API_KEY
 # - PINATA_SECRET_KEY
-# Media files are uploaded directly to IPFS via Pinata in the asset creation flow,
-# not stored locally or in Azure Blob Storage.
-
-# Optional: Azure Blob Storage for media files (if you want to use it instead of Pinata)
-# Uncomment below and set USE_AZURE_STORAGE=true in environment to enable
-USE_AZURE_STORAGE = env.bool('USE_AZURE_STORAGE', default=False)
-if USE_AZURE_STORAGE:
-    DEFAULT_FILE_STORAGE = 'storages.backends.azure_storage.AzureStorage'
-    AZURE_ACCOUNT_NAME = env('AZURE_ACCOUNT_NAME', default='')
-    AZURE_ACCOUNT_KEY = env('AZURE_ACCOUNT_KEY', default='')
-    AZURE_CONTAINER = env('AZURE_CONTAINER', default='media')
+# Media files are uploaded directly to IPFS via Pinata in the asset creation flow.
 
 # Logging
 LOGGING = {

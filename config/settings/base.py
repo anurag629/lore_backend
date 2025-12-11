@@ -195,35 +195,6 @@ SIMPLE_JWT = {
     'SLIDING_TOKEN_REFRESH_LIFETIME': timedelta(days=1),
 }
 
-# Celery Configuration
-CELERY_BROKER_URL = env('REDIS_URL', default='redis://localhost:6379/0')
-CELERY_RESULT_BACKEND = env('REDIS_URL', default='redis://localhost:6379/0')
-CELERY_ACCEPT_CONTENT = ['json']
-CELERY_TASK_SERIALIZER = 'json'
-CELERY_RESULT_SERIALIZER = 'json'
-CELERY_TIMEZONE = TIME_ZONE
-CELERY_ENABLE_UTC = True
-
-# Celery Beat Schedule (periodic tasks)
-CELERY_BEAT_SCHEDULE = {
-    'sync-blockchain-events': {
-        'task': 'sync_blockchain_events',
-        'schedule': 300.0,  # Every 5 minutes
-    },
-    'process-royalty-payments': {
-        'task': 'process_royalty_payments',
-        'schedule': 600.0,  # Every 10 minutes
-    },
-    'cleanup-old-logs': {
-        'task': 'cleanup_old_logs',
-        'schedule': 86400.0,  # Daily
-    },
-    'update-asset-statistics': {
-        'task': 'update_asset_statistics',
-        'schedule': 3600.0,  # Every hour
-    },
-}
-
 # Web3 Configuration
 WEB3_PROVIDER_URI = env('WEB3_PROVIDER_URI', default='https://aeneid.storyrpc.io')
 STORY_PROTOCOL_CHAIN_ID = env.int('STORY_PROTOCOL_CHAIN_ID', default=1315)

@@ -10,10 +10,6 @@ drf-spectacular>=0.27.0
 # Database
 psycopg2-binary>=2.9.9
 
-# Task Queue
-celery>=5.3.4
-redis>=5.0.0
-
 # Web3 & Blockchain
 web3>=6.13.0
 eth-account>=0.10.0

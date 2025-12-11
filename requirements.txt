@@ -1,0 +1,3 @@
+# Root requirements file for Azure App Service Oryx build detection
+# This file references the production requirements
+-r requirements/production.txt
